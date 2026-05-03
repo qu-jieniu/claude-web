@@ -1,0 +1,12 @@
+[Unit]
+Description=ttyd-served persistent screen session for Claude Code
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ttyd -p 7682 -i 127.0.0.1 -W -t fontSize=14 -t titleFixed=claude -t disableLeaveAlert=true %h/.local/bin/claude-launcher
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

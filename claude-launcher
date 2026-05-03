@@ -1,0 +1,719 @@
+#!/bin/bash
+# Interactive session picker for Claude Code, backed by named `screen` sessions.
+# Used as ttyd's entry point (claude-web.service) and as the local `claude-attach`
+# function. Each project lives in its own `claude-<name>` screen session.
+set -uo pipefail
+
+PROJECTS_DIR="$HOME/.claude/projects"
+STATE_DIR="$HOME/claude-web/state/sessions"
+mkdir -p "$STATE_DIR"
+
+sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_-' '_' | tr -s '_'; }
+
+# Per-session state for restore-on-boot. One file per screen, named
+# $STATE_DIR/<screen-name>.env, sourced by claude-web-restore. We persist cwd,
+# kind (claude/shell), and whether --dangerously-skip-permissions was used.
+# The original --resume UUID is NOT persisted — restore uses `claude --continue`
+# to pick up the latest JSONL in the project, matching the session's current
+# state rather than the older launch point.
+write_state() {
+    # $1 = full screen name (claude-*)  $2 = kind (claude|shell)  $3 = cwd  $4 = args (optional)
+    local sname="$1" kind="$2" cwd="$3" args="${4:-}"
+    local skip=0
+    [[ "$args" == *--dangerously-skip-permissions* ]] && skip=1
+    {
+        printf 'KIND=%s\n' "$kind"
+        printf 'CWD=%q\n' "$cwd"
+        printf 'SKIP_PERMS=%d\n' "$skip"
+    } > "$STATE_DIR/$sname.env"
+}
+
+# Given a cwd, return the encoded ~/.claude/projects/ dir name: / and . → -
+project_dir_for() { printf '%s/%s' "$PROJECTS_DIR" "$(printf '%s' "$1" | sed 's|[/.]|-|g')"; }
+
+# After a claude session is launched/resumed in `cwd`, find the newest JSONL in
+# its project dir and write UUID= into the session's .env. Lets subsequent boots
+# / lazy-resumes pin to the exact session rather than whatever --continue picks.
+capture_session_uuid() {
+    local sname="$1" cwd="$2"
+    local pdir; pdir=$(project_dir_for "$cwd")
+    [ -d "$pdir" ] || return 0
+    local newest uuid
+    newest=$(ls -t "$pdir"/*.jsonl 2>/dev/null | head -1)
+    [ -n "$newest" ] || return 0
+    uuid=$(basename "$newest" .jsonl)
+    local env="$STATE_DIR/$sname.env"
+    [ -f "$env" ] || return 0
+    if grep -q '^UUID=' "$env"; then
+        sed -i "s|^UUID=.*|UUID=$uuid|" "$env"
+    else
+        printf 'UUID=%s\n' "$uuid" >> "$env"
+    fi
+}
+
+remove_state() { rm -f "$STATE_DIR/$1.env"; }
+
+rename_state() {
+    # $1 = old full name  $2 = new full name
+    [ -f "$STATE_DIR/$1.env" ] && mv "$STATE_DIR/$1.env" "$STATE_DIR/$2.env"
+}
+
+# Walk running `claude-*` screens and write a state file for any that don't
+# have one yet. The cwd is recovered from /proc/<child-bash-pid>/cwd; kind is
+# inferred by checking whether any descendant process matches `claude` by name.
+# Excludes `claude-discord` because that session is systemd-managed with a
+# bespoke bootstrap (token export) — auto-restoring via `claude --continue`
+# would skip the Discord plugin setup and fail.
+sync_existing_state() {
+    local line pid name bash_pid cwd kind has_claude
+    while IFS= read -r line; do
+        [[ "$line" =~ ([0-9]+)\.claude-([^[:space:]]+) ]] || continue
+        pid="${BASH_REMATCH[1]}"
+        name="claude-${BASH_REMATCH[2]}"
+        [ "$name" = "claude-discord" ] && continue
+        [ -f "$STATE_DIR/$name.env" ] && continue
+
+        bash_pid=$(pgrep -P "$pid" -n 2>/dev/null | head -1)
+        [ -z "$bash_pid" ] && continue
+        cwd=$(readlink "/proc/$bash_pid/cwd" 2>/dev/null)
+        [ -z "$cwd" ] || [ ! -d "$cwd" ] && cwd="$HOME"
+
+        if pgrep -f -P "$bash_pid" claude 2>/dev/null | grep -qv "^$bash_pid$" \
+           || pgrep --ns "$bash_pid" -x claude 2>/dev/null | head -1 >/dev/null; then
+            kind=claude
+        else
+            # Fallback: any descendant named 'claude'
+            if pstree -p "$pid" 2>/dev/null | grep -q 'claude('; then
+                kind=claude
+            else
+                kind=shell
+            fi
+        fi
+
+        write_state "$name" "$kind" "$cwd" ""
+    done < <(screen -ls 2>/dev/null)
+}
+
+short_name_for() {
+    local path="$1" base
+    if [ "$path" = "$HOME" ]; then echo "home"; return; fi
+    base=$(sanitize "$(basename "$path")")
+    # Avoid double-prefix like claude-claude-web when basename already starts with claude-
+    base="${base#claude-}"
+    [ -z "$base" ] && base="session"
+    printf '%s' "$base"
+}
+
+time_ago() {
+    local now diff
+    now=$(date +%s); diff=$(( now - $1 ))
+    if   (( diff < 60 ));    then echo "${diff}s ago"
+    elif (( diff < 3600 ));  then echo "$((diff/60))m ago"
+    elif (( diff < 86400 )); then echo "$((diff/3600))h ago"
+    else echo "$((diff/86400))d ago"
+    fi
+}
+
+extract_cwd() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as fp:
+        for line in fp:
+            line = line.strip()
+            if not line: continue
+            try: d = json.loads(line)
+            except Exception: continue
+            if isinstance(d, dict) and 'cwd' in d:
+                print(d['cwd']); break
+except Exception:
+    pass
+PY
+}
+
+extract_first_user_msg() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import json, sys
+def flat(c):
+    if isinstance(c, str): return c
+    if isinstance(c, list):
+        parts = []
+        for x in c:
+            if isinstance(x, dict) and x.get('type') == 'text':
+                parts.append(x.get('text', ''))
+        return ' '.join(parts)
+    return ''
+try:
+    with open(sys.argv[1]) as fp:
+        for line in fp:
+            line = line.strip()
+            if not line: continue
+            try: d = json.loads(line)
+            except Exception: continue
+            if d.get('type') in ('user', 'human'):
+                msg = d.get('message', d.get('content', ''))
+                if isinstance(msg, dict):
+                    text = flat(msg.get('content', ''))
+                else:
+                    text = flat(msg)
+                text = ' '.join(text.split())  # collapse whitespace
+                if text:
+                    print(text[:100]); break
+except Exception:
+    pass
+PY
+}
+
+list_running_detailed() {
+    # Emits: name|pid|state(A/D)|start_epoch
+    local line pid name state etimes start now
+    now=$(date +%s)
+    while IFS= read -r line; do
+        [[ "$line" =~ ([0-9]+)\.claude-([^[:space:]]+).*\(([A-Za-z]+)\) ]] || continue
+        pid="${BASH_REMATCH[1]}"
+        name="${BASH_REMATCH[2]}"
+        case "${BASH_REMATCH[3]}" in
+            Attached) state="A" ;;
+            Detached) state="D" ;;
+            Dead) state="X" ;;
+            *) state="?" ;;
+        esac
+        etimes=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [[ "$etimes" =~ ^[0-9]+$ ]]; then
+            start=$(( now - etimes ))
+        else
+            start=0
+        fi
+        printf '%s|%s|%s|%s\n' "$name" "$pid" "$state" "$start"
+    done < <(screen -ls 2>/dev/null)
+}
+
+list_projects() {
+    local dir newest cwd mtime name
+    for dir in "$PROJECTS_DIR"/*/; do
+        [ -d "$dir" ] || continue
+        newest=$(ls -t "$dir"*.jsonl 2>/dev/null | head -1)
+        [ -z "$newest" ] && continue
+        cwd=$(extract_cwd "$newest")
+        [ -z "$cwd" ] && continue
+        [ -d "$cwd" ] || continue
+        mtime=$(stat -c %Y "$newest" 2>/dev/null || echo 0)
+        name=$(short_name_for "$cwd")
+        printf '%s|%s|%s|%s\n' "$name" "$cwd" "$mtime" "${dir%/}"
+    done | sort -t'|' -k3,3nr
+}
+
+list_sessions_in() {
+    # Sessions in a project dir, sorted newest-first.
+    # Output: uuid|mtime|first-user-msg
+    local pdir="$1" f uuid mtime preview
+    for f in "$pdir"/*.jsonl; do
+        [ -f "$f" ] || continue
+        uuid=$(basename "$f" .jsonl)
+        mtime=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        preview=$(extract_first_user_msg "$f")
+        [ -z "$preview" ] && preview="(no user messages)"
+        printf '%s|%s|%s\n' "$uuid" "$mtime" "$preview"
+    done | sort -t'|' -k2,2nr
+}
+
+banner() {
+    clear
+    printf '\n'
+    printf '  Claude Code — session launcher\n'
+    printf '  %s\n\n' "$(date '+%F %H:%M')"
+    printf '  screen:  Ctrl-A d   = detach (back to this menu)\n'
+    printf '           Ctrl-A a d = detach an inner nested screen\n'
+    printf '           Ctrl-A [   = scroll mode (PgUp/PgDn, / and ? search, q exit)\n\n'
+}
+
+attach_session() { screen -D -RR -S "claude-$1"; }
+
+screen_exists() { screen -ls 2>/dev/null | grep -q "\.$1[[:space:]]"; }
+
+next_shell_name() {
+    # Returns the next unused shell suffix: shell, shell-2, shell-3, ...
+    local i=1 name="shell"
+    while screen_exists "claude-$name"; do
+        i=$((i+1)); name="shell-$i"
+    done
+    printf '%s' "$name"
+}
+
+launch_new_screen() {
+    # $1 = full screen name (claude-<suffix>)  $2 = cwd  $3 = claude args (may be empty)
+    # Ephemeral — no .env is written. Use [save] in the menu to bookmark.
+    local sname="$1" cwd="$2" args="$3"
+    screen -S "$sname" bash -lc "cd \"$cwd\" && claude ${args}; exec \"\$SHELL\""
+}
+
+# Resume a saved session (one with a .env but no live screen).
+# Uses --resume <UUID> if UUID is recorded, else --continue.
+resume_saved_session() {
+    local sname="$1"
+    local env="$STATE_DIR/$sname.env"
+    if [ ! -f "$env" ]; then echo "no state for $sname"; sleep 1; return 1; fi
+    local KIND="" CWD="" SKIP_PERMS=0 UUID=""
+    # shellcheck disable=SC1090
+    source "$env"
+    if [ -z "$CWD" ] || [ ! -d "$CWD" ]; then
+        echo "cwd missing: ${CWD:-unset} — remove $env to forget this session"
+        sleep 2; return 1
+    fi
+    local flags=""
+    [ "${SKIP_PERMS:-0}" = "1" ] && flags=" --dangerously-skip-permissions"
+    case "$KIND" in
+        shell)
+            screen -S "$sname" bash -l
+            ;;
+        claude)
+            local resume_cmd
+            if [ -n "$UUID" ]; then
+                resume_cmd="claude --resume \"$UUID\"${flags}"
+            else
+                resume_cmd="claude --continue${flags}"
+            fi
+            screen -S "$sname" bash -lc "cd \"$CWD\" && $resume_cmd; exec \"\$SHELL\""
+            capture_session_uuid "$sname" "$CWD"
+            ;;
+        *)
+            echo "unknown KIND=${KIND:-unset} in $env"; sleep 1; return 1
+            ;;
+    esac
+}
+
+# Output: name|last_active_epoch for .env files without a running screen.
+# last_active: newest JSONL mtime in the session's project dir, else .env mtime.
+list_saved_sessions() {
+    local env sname KIND CWD pdir newest mtime
+    shopt -s nullglob
+    for env in "$STATE_DIR"/*.env; do
+        sname=$(basename "$env" .env)
+        if screen_exists "$sname"; then continue; fi
+        KIND=""; CWD=""
+        # shellcheck disable=SC1090
+        source "$env"
+        mtime=$(stat -c %Y "$env" 2>/dev/null || echo 0)
+        if [ "$KIND" = "claude" ] && [ -n "$CWD" ] && [ -d "$CWD" ]; then
+            pdir=$(project_dir_for "$CWD")
+            newest=$(ls -t "$pdir"/*.jsonl 2>/dev/null | head -1)
+            if [ -n "$newest" ]; then
+                mtime=$(stat -c %Y "$newest" 2>/dev/null || echo "$mtime")
+            fi
+        fi
+        printf '%s|%s\n' "$sname" "$mtime"
+    done | sort -t'|' -k2,2nr
+}
+
+kill_session() {
+    # Kills the running screen. Leaves any saved .env intact (use [forget] to remove).
+    local name="$1"
+    screen -S "claude-$name" -X quit 2>/dev/null || true
+    echo "Killed claude-$name (if it existed)."
+    sleep 1
+}
+
+# [save] — bookmark a running screen for later resume. Writes state/sessions/<name>.env
+# capturing kind (claude/shell), cwd (from /proc/<child-bash>/cwd), skip_perms (prompted),
+# and UUID (from the newest JSONL in the project dir).
+save_session() {
+    local name="$1"           # screen suffix, e.g. "home"
+    local sname="claude-$name"
+    local pid bash_pid cwd kind
+    pid=$(screen -ls 2>/dev/null | grep "\.$sname[[:space:]]" | head -1 | awk -F. '{print $1}' | tr -d '[:space:]')
+    if [ -z "$pid" ]; then echo "screen $sname not found"; sleep 1; return 1; fi
+    bash_pid=$(pgrep -P "$pid" -n 2>/dev/null | head -1)
+    cwd=$(readlink "/proc/$bash_pid/cwd" 2>/dev/null)
+    if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then cwd="$HOME"; fi
+    if pstree -p "$pid" 2>/dev/null | grep -q 'claude('; then kind=claude; else kind=shell; fi
+
+    local flags=""
+    if [ "$kind" = "claude" ]; then
+        local ans
+        read -erp "Save with --dangerously-skip-permissions? [y/N]: " ans
+        case "${ans,,}" in y|yes) flags=" --dangerously-skip-permissions" ;; esac
+    fi
+
+    if [ -f "$STATE_DIR/$sname.env" ]; then
+        echo "(overwriting existing save for $sname)"
+    fi
+    write_state "$sname" "$kind" "$cwd" "$flags"
+    [ "$kind" = "claude" ] && capture_session_uuid "$sname" "$cwd"
+
+    echo "Saved $sname (kind=$kind, cwd=$cwd)."
+    sleep 1
+}
+
+forget_saved_session() {
+    local sname="$1"  # full screen name (claude-*)
+    remove_state "$sname"
+    echo "Forgot $sname (removed $STATE_DIR/$sname.env)."
+    sleep 1
+}
+
+pick_saved_menu() {
+    banner
+    echo "Saved sessions (pick one to forget):"
+    echo
+    local -a names=()
+    local n
+    while IFS='|' read -r n _; do
+        [ -z "$n" ] && continue
+        names+=("$n")
+    done < <(list_saved_sessions)
+    if [ "${#names[@]}" -eq 0 ]; then
+        echo "(no saved sessions to forget)"; sleep 1; return
+    fi
+    names+=("cancel")
+    PS3=$'\nforget which? '
+    local pick
+    select pick in "${names[@]}"; do
+        [ -z "${pick:-}" ] && continue
+        [ "$pick" = "cancel" ] && break
+        forget_saved_session "$pick"
+        break
+    done
+}
+
+rename_session() {
+    local old="$1" input new_suffix new_name
+    read -erp "New name for claude-$old [claude-$old]: " input
+    input="${input:-$old}"
+    # Strip claude- so typing "claude-foo" doesn't become claude-claude-foo
+    input="${input#claude-}"
+    new_suffix=$(sanitize "$input")
+    [ -z "$new_suffix" ] && { echo "invalid name"; sleep 1; return 1; }
+    if [ "$new_suffix" = "$old" ]; then
+        echo "(name unchanged)"; sleep 1; return 0
+    fi
+    new_name="claude-$new_suffix"
+    if screen_exists "$new_name"; then
+        echo "A screen named $new_name already exists. Pick another name."; sleep 2; return 1
+    fi
+    if screen -S "claude-$old" -X sessionname "$new_name"; then
+        rename_state "claude-$old" "$new_name"
+        echo "Renamed claude-$old -> $new_name."
+    else
+        echo "Rename failed."
+    fi
+    sleep 1
+}
+
+resume_specific_session() {
+    local name="$1" cwd="$2" uuid="$3"
+    local short="${uuid:0:8}"
+    local default="${name}-${short}"
+    local n sname
+    n=$(prompt_screen_name "$default") || { echo "invalid name"; sleep 1; return 1; }
+    sname="claude-$n"
+    if screen_exists "$sname"; then
+        echo
+        echo "Warning: screen '$sname' already exists — attaching to it instead of resuming $short."
+        echo "The existing session keeps its original UUID and flags; nothing is resumed."
+        read -erp "Press Enter to attach anyway, or Ctrl-C to cancel: " _
+        screen -D -RR -S "$sname"
+    else
+        local flags; flags=$(prompt_skip_perms)
+        local save=0; prompt_auto_save && save=1
+        [ "$save" = 1 ] && write_state "$sname" claude "$cwd" "$flags"
+        launch_new_screen "$sname" "$cwd" "--resume $uuid${flags}"
+        [ "$save" = 1 ] && capture_session_uuid "$sname" "$cwd"
+    fi
+}
+
+pick_by_uuid() {
+    local input full_uuid matches=()
+    read -erp "UUID (full or 8+ char prefix): " input || return
+    input=$(echo "$input" | tr -d '[:space:]')
+    [ -z "$input" ] && return
+    [ "${#input}" -lt 8 ] && { echo "need 8+ chars"; sleep 1; return; }
+
+    # Find matching jsonl files under any project dir.
+    while IFS= read -r f; do matches+=("$f"); done < <(compgen -G "$PROJECTS_DIR/*/$input*.jsonl" 2>/dev/null || true)
+
+    if [ "${#matches[@]}" -eq 0 ]; then
+        echo "No session matching $input"; sleep 2; return
+    fi
+    if [ "${#matches[@]}" -gt 1 ]; then
+        echo "Ambiguous — matches:"
+        printf '  %s\n' "${matches[@]}"
+        sleep 3; return
+    fi
+    local f="${matches[0]}"
+    full_uuid=$(basename "$f" .jsonl)
+    local cwd; cwd=$(extract_cwd "$f")
+    if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then
+        echo "cwd not found or stale for $full_uuid"; sleep 2; return
+    fi
+    local sel_name; sel_name=$(short_name_for "$cwd")
+    echo "Found: $full_uuid  cwd=$cwd"
+    resume_specific_session "$sel_name" "$cwd" "$full_uuid"
+}
+
+pick_session_menu() {
+    banner
+    echo "Pick a project (or type a UUID directly):"
+    echo
+    local -a plabels=() pcwds=() pdirs=() pnames=()
+    local name cwd mtime pdir
+    while IFS='|' read -r name cwd mtime pdir; do
+        [ -z "$name" ] && continue
+        plabels+=("$name  —  $cwd  ($(time_ago "$mtime"))")
+        pcwds+=("$cwd")
+        pdirs+=("$pdir")
+        pnames+=("$name")
+    done < <(list_projects)
+    plabels+=("[id] Type UUID directly...")
+    plabels+=("cancel")
+
+    PS3=$'\nproject: '
+    local opt
+    select opt in "${plabels[@]}"; do
+        [ -z "${opt:-}" ] && continue
+        [ "$opt" = "cancel" ] && return
+        if [ "$opt" = "[id] Type UUID directly..." ]; then
+            pick_by_uuid; return
+        fi
+        local idx=$(( REPLY - 1 ))
+        (( idx < 0 || idx >= ${#pcwds[@]} )) && continue
+        local sel_name="${pnames[$idx]}"
+        local sel_cwd="${pcwds[$idx]}"
+        local sel_pdir="${pdirs[$idx]}"
+
+        echo
+        echo "Sessions in $sel_name (newest first):"
+        echo
+        local -a slabels=() suuids=()
+        local uuid stime preview
+        while IFS='|' read -r uuid stime preview; do
+            [ -z "$uuid" ] && continue
+            slabels+=("${uuid:0:8}  ($(time_ago "$stime"))  ${preview:0:70}")
+            suuids+=("$uuid")
+        done < <(list_sessions_in "$sel_pdir")
+        if [ "${#suuids[@]}" -eq 0 ]; then
+            echo "(no sessions in $sel_pdir)"; sleep 1; return
+        fi
+        slabels+=("cancel")
+
+        PS3=$'\nsession: '
+        local sopt
+        select sopt in "${slabels[@]}"; do
+            [ -z "${sopt:-}" ] && continue
+            [ "$sopt" = "cancel" ] && return
+            local sidx=$(( REPLY - 1 ))
+            (( sidx < 0 || sidx >= ${#suuids[@]} )) && continue
+            resume_specific_session "$sel_name" "$sel_cwd" "${suuids[$sidx]}"
+            return
+        done
+        return
+    done
+}
+
+prompt_screen_name() {
+    # $1 = default (without claude- prefix). Prints chosen name on stdout (also without prefix).
+    local default="$1" input n
+    read -erp "Screen name [claude-$default]: " input
+    input="${input:-$default}"
+    # Strip claude- so typing "claude-foo" doesn't become claude-claude-foo
+    input="${input#claude-}"
+    n=$(sanitize "$input")
+    [ -z "$n" ] && { echo "" ; return 1; }
+    printf '%s' "$n"
+}
+
+prompt_skip_perms() {
+    local ans
+    read -erp "Skip permissions (--dangerously-skip-permissions)? [y/N]: " ans
+    case "${ans,,}" in
+        y|yes) printf ' --dangerously-skip-permissions' ;;
+        *) printf '' ;;
+    esac
+}
+
+# Returns 0 if user wants this session bookmarked, 1 otherwise.
+prompt_auto_save() {
+    local ans
+    read -erp "Save as bookmark for later resume? [y/N]: " ans
+    case "${ans,,}" in y|yes) return 0 ;; *) return 1 ;; esac
+}
+
+prompt_custom_path() {
+    local p default n sname ans
+    read -erp "Path (Tab to complete): " p || return 1
+    p="${p/#\~/$HOME}"
+    [ -z "$p" ] && return 1
+    if [ ! -e "$p" ]; then
+        read -erp "Path does not exist. Create it? [Y/n]: " ans
+        case "${ans,,}" in
+            n|no) echo "cancelled"; sleep 1; return 1 ;;
+        esac
+        mkdir -p "$p" || { echo "mkdir failed"; sleep 1; return 1; }
+    fi
+    p=$(realpath -e "$p" 2>/dev/null) || { echo "invalid path"; sleep 1; return 1; }
+    [ -d "$p" ] || { echo "not a directory"; sleep 1; return 1; }
+    default=$(short_name_for "$p")
+    n=$(prompt_screen_name "$default") || { echo "invalid name"; sleep 1; return 1; }
+    sname="claude-$n"
+    if screen_exists "$sname"; then
+        echo "A screen named $sname already exists. Pick another name."; sleep 2; return 1
+    fi
+    local flags; flags=$(prompt_skip_perms)
+    local save=0; prompt_auto_save && save=1
+    [ "$save" = 1 ] && write_state "$sname" claude "$p" "$flags"
+    launch_new_screen "$sname" "$p" "$flags"
+    [ "$save" = 1 ] && capture_session_uuid "$sname" "$p"
+}
+
+pick_running_menu() {
+    # $1 = verb (e.g. "kill", "rename") — drives the prompt text
+    # $2 = callback function name, invoked as "<callback> <screen-suffix>"
+    local verb="$1" callback="$2"
+    banner
+    echo "Running screens (pick one to $verb):"
+    echo
+    local -a names=()
+    local n
+    while IFS='|' read -r n _ _ _; do
+        [ -z "$n" ] && continue
+        names+=("$n")
+    done < <(list_running_detailed | sort -t'|' -k4,4nr)
+    if [ "${#names[@]}" -eq 0 ]; then
+        echo "(nothing to $verb)"; sleep 1; return
+    fi
+    names+=("cancel")
+    PS3=$'\n'"$verb which? "
+    local pick
+    select pick in "${names[@]}"; do
+        [ -z "${pick:-}" ] && continue
+        [ "$pick" = "cancel" ] && break
+        "$callback" "$pick"
+        break
+    done
+}
+
+run_menu() {
+    banner
+    # No auto-sync: sessions are ephemeral unless explicitly saved via [save].
+    # The --sync flag on ~/claude-web/claude-web-restore is still available for
+    # one-shot migration of pre-existing screens.
+
+    local -a labels=() actions=()
+    local -A letter_map=()  # letter -> action index
+    local -A running_map=()
+    local -A running_info=()
+    local n rname rpid rstate rstart
+
+    while IFS='|' read -r rname rpid rstate rstart; do
+        [ -z "$rname" ] && continue
+        running_map["$rname"]=1
+        running_info["$rname"]="$rstate|$rstart"
+    done < <(list_running_detailed)
+
+    local -a sorted_names=()
+    while IFS='|' read -r _ n; do
+        [ -z "$n" ] && continue
+        sorted_names+=("$n")
+    done < <(
+        for n in "${!running_info[@]}"; do
+            IFS='|' read -r _ start <<< "${running_info[$n]}"
+            printf '%s|%s\n' "$start" "$n"
+        done | sort -t'|' -k1,1nr
+    )
+
+    for n in "${sorted_names[@]}"; do
+        IFS='|' read -r rstate rstart <<< "${running_info[$n]:-?|0}"
+        local state_label
+        case "$rstate" in
+            A) state_label="attached" ;;
+            D) state_label="detached" ;;
+            X) state_label="dead — use [kill] to remove" ;;
+            *) state_label="unknown" ;;
+        esac
+        local age_label=""
+        [ "$rstart" -gt 0 ] && age_label=", $(time_ago "$rstart")"
+        labels+=("[running] claude-$n  ($state_label$age_label)")
+        actions+=("attach:$n")
+    done
+
+    # Saved sessions: .env exists, screen doesn't. Picking one resumes it.
+    local saved_name saved_mtime
+    local saved_count=0
+    while IFS='|' read -r saved_name saved_mtime; do
+        [ -z "$saved_name" ] && continue
+        local age_label=""
+        [ "$saved_mtime" -gt 0 ] && age_label=", last active $(time_ago "$saved_mtime")"
+        labels+=("[saved]   $saved_name$age_label")
+        actions+=("resume_saved:$saved_name")
+        saved_count=$((saved_count + 1))
+    done < <(list_saved_sessions)
+
+    labels+=("(s) [shell]   New plain terminal (claude-shell-N)")
+    actions+=("shell"); letter_map[s]=$(( ${#actions[@]} - 1 ))
+
+    labels+=("(n) [new]     Start in custom path...")
+    actions+=("custom"); letter_map[n]=$(( ${#actions[@]} - 1 ))
+
+    labels+=("(p) [pick]    Resume a session...")
+    actions+=("pick_session"); letter_map[p]=$(( ${#actions[@]} - 1 ))
+
+    if [ "${#running_map[@]}" -gt 0 ]; then
+        labels+=("(v) [save]    Bookmark a running session for later resume...")
+        actions+=("save_menu"); letter_map[v]=$(( ${#actions[@]} - 1 ))
+
+        labels+=("(r) [rename]  Rename a running session...")
+        actions+=("rename_menu"); letter_map[r]=$(( ${#actions[@]} - 1 ))
+
+        labels+=("(k) [kill]    Kill a running session...")
+        actions+=("kill_menu"); letter_map[k]=$(( ${#actions[@]} - 1 ))
+    fi
+
+    if [ "$saved_count" -gt 0 ]; then
+        labels+=("(f) [forget]  Remove a saved session (.env only)...")
+        actions+=("forget_menu"); letter_map[f]=$(( ${#actions[@]} - 1 ))
+    fi
+
+    local i
+    for ((i=0; i<${#labels[@]}; i++)); do
+        printf '  %2d) %s\n' "$((i+1))" "${labels[$i]}"
+    done
+
+    local reply idx action
+    while true; do
+        printf '\n> '
+        read -r reply || exit 0   # Ctrl-D exits the launcher
+        [ -z "$reply" ] && continue
+
+        if [[ "$reply" =~ ^[a-zA-Z]$ ]]; then
+            local l="${reply,,}"
+            if [ -z "${letter_map[$l]:-}" ]; then
+                echo "no shortcut '$reply'"; continue
+            fi
+            idx="${letter_map[$l]}"
+        elif [[ "$reply" =~ ^[0-9]+$ ]]; then
+            idx=$(( reply - 1 ))
+            if (( idx < 0 || idx >= ${#actions[@]} )); then
+                echo "out of range"; continue
+            fi
+        else
+            echo "enter a number or letter"; continue
+        fi
+
+        action="${actions[$idx]}"
+        case "$action" in
+            attach:*)       attach_session "${action#attach:}"; return ;;
+            resume_saved:*) resume_saved_session "${action#resume_saved:}"; return ;;
+            custom)         prompt_custom_path; return ;;
+            shell)          local sname="claude-$(next_shell_name)"
+                            local save=0; prompt_auto_save && save=1
+                            [ "$save" = 1 ] && write_state "$sname" shell "$HOME" ""
+                            screen -S "$sname"; return ;;
+            pick_session)   pick_session_menu; return ;;
+            kill_menu)      pick_running_menu kill kill_session; return ;;
+            rename_menu)    pick_running_menu rename rename_session; return ;;
+            save_menu)      pick_running_menu save save_session; return ;;
+            forget_menu)    pick_saved_menu; return ;;
+        esac
+    done
+}
+
+while true; do run_menu; done

@@ -1,0 +1,26 @@
+#!/bin/bash
+# Bootstrap for the Discord router screen session.
+# Invoked by ~/.config/systemd/user/claude-discord.service.
+#
+# Why the token is read from .env.bak and exported in this shell (not left at
+# the plugin's default ~/.claude/channels/discord/.env path): the Discord MCP
+# plugin is installed at user scope, so every `claude` session auto-loads it.
+# Discord permits only one gateway connection per bot token — multiple sessions
+# logging in trigger a kick-loop. Moving the token out of the default path and
+# exporting it only here means only the router actually logs in.
+set -euo pipefail
+
+TOKEN_FILE="$HOME/.claude/channels/discord/.env.bak"
+[ -r "$TOKEN_FILE" ] || { echo "Missing $TOKEN_FILE" >&2; exit 1; }
+
+exec /usr/bin/screen -DmS claude-discord /usr/bin/bash -lc '
+    set -euo pipefail
+    export DISCORD_BOT_TOKEN=$(grep -E "^DISCORD_BOT_TOKEN=" "$HOME/.claude/channels/discord/.env.bak" | cut -d= -f2-)
+    [ -n "$DISCORD_BOT_TOKEN" ] || { echo "DISCORD_BOT_TOKEN empty in .env.bak" >&2; exit 1; }
+    cd "$HOME/claude-web"
+    exec claude \
+        --channels plugin:discord@claude-plugins-official
+        # Add directories you want the router to be able to reach, e.g.:
+        #   --add-dir "$HOME/path/to/project-a" \
+        #   --add-dir "$HOME/path/to/project-b"
+'
