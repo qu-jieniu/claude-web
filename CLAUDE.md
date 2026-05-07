@@ -120,7 +120,6 @@ Other flags (`--permission-mode plan|acceptEdits`, `--model sonnet|opus|haiku`) 
 ├── claude-web-restore           # manual bulk re-spawner + --sync (not auto-run at boot)
 ├── state/sessions/*.env         # per-session state written by the launcher; consumed by restore (gitignored)
 ├── claude-web.sh                # bash alias (source of truth, symlinked into ~/.bashrc.d)
-├── ttyd-256color.src            # custom terminfo source — install to /etc/terminfo to fix browser-tab title
 └── systemd/
     ├── claude-web.service           # ttyd launcher service
     ├── claude-discord.service       # Discord router service
@@ -137,7 +136,7 @@ Suggested install (symlinks let you `git pull` and have updates take effect imme
 One-time root step (for the browser-tab title to show the session name):
 
     sudo install -d /etc/terminfo/t
-    sudo tic -x -o /etc/terminfo ~/claude-web/ttyd-256color.src
+    sudo tic -x -o /etc/terminfo ~/ttyd-256color.src    # source kept at ~/ — see header
 ```
 
 Dependencies on the host: `ttyd` (Fedora `updates` repo), `screen`, `python3` (for JSONL `cwd` extraction), `bash` 4+ (associative arrays).
