@@ -99,11 +99,22 @@ def session_jsonl(env: dict) -> str | None:
     return newest_jsonl(cwd)
 
 
-def parse_ctx(jsonl_path: str) -> tuple[int | None, str | None]:
-    """Latest assistant turn's input-side usage. Cache reads count toward
-    the model's context window the same as fresh input — auto-compact
-    fires on the sum, not on uncached input alone."""
-    last = None
+def parse_ctx(jsonl_path: str) -> tuple[int | None, int | None, str | None]:
+    """Returns (latest_ctx, max_ctx_ever, model). Max is tracked across the
+    whole JSONL so a session that's already crossed into 1M-context territory
+    keeps reporting the right threshold even after Claude auto-compacts and
+    drops the latest turn back below 200K."""
+    last_ctx: int | None = None
+    max_ctx = 0
+    model: str | None = None
+
+    def turn_ctx(u: dict) -> int:
+        return (
+            u.get("input_tokens", 0)
+            + u.get("cache_creation_input_tokens", 0)
+            + u.get("cache_read_input_tokens", 0)
+        )
+
     try:
         with open(jsonl_path) as fp:
             for line in fp:
@@ -111,28 +122,34 @@ def parse_ctx(jsonl_path: str) -> tuple[int | None, str | None]:
                     d = json.loads(line)
                 except Exception:
                     continue
-                if d.get("type") == "assistant" and d.get("message", {}).get("usage"):
-                    last = d
+                if d.get("type") != "assistant":
+                    continue
+                msg = d.get("message", {})
+                u = msg.get("usage")
+                if not u:
+                    continue
+                ctx = turn_ctx(u)
+                last_ctx = ctx
+                if ctx > max_ctx:
+                    max_ctx = ctx
+                if msg.get("model"):
+                    model = msg["model"]
     except Exception:
-        return None, None
-    if not last:
-        return None, None
-    msg = last["message"]
-    u = msg.get("usage", {})
-    ctx = (
-        u.get("input_tokens", 0)
-        + u.get("cache_creation_input_tokens", 0)
-        + u.get("cache_read_input_tokens", 0)
-    )
-    return ctx, msg.get("model")
+        return None, None, None
+    if last_ctx is None:
+        return None, None, None
+    return last_ctx, max_ctx, model
 
 
-def compact_threshold(ctx: int) -> int:
-    """Heuristic for the auto-compact trigger. Claude Code compacts at
-    ~95% of the model's context window. Without an explicit signal of
-    whether 1M-context mode is on, infer from observed ctx — anything
-    over 200K means we're already in 1M territory."""
-    return 950_000 if ctx > 200_000 else 190_000
+def compact_threshold(max_ctx: int) -> int:
+    """Auto-compact trigger ≈ 95% of the model's context window. The JSONL
+    records only the bare model id ("claude-opus-4-7") — no signal whether
+    [1m] mode is on — so we infer from the largest ctx ever observed in
+    this session: any past turn over 200K means we're in 1M territory and
+    the threshold should stay at 950K even when the current turn is small.
+    A fresh 1M-mode session that hasn't crossed 200K yet will misreport
+    until it does; there's no clean fix without the model id telling us."""
+    return 950_000 if max_ctx > 200_000 else 190_000
 
 
 def load_creds() -> dict:
@@ -214,10 +231,10 @@ def fmt_ctx(name: str | None) -> str | None:
     jsonl = session_jsonl(env)
     if not jsonl:
         return "ctx -"
-    ctx, _model = parse_ctx(jsonl)
+    ctx, max_ctx, _model = parse_ctx(jsonl)
     if ctx is None:
         return "ctx ?"
-    cap = compact_threshold(ctx)
+    cap = compact_threshold(max_ctx or ctx)
     pct = round(ctx * 100 / cap)
     return f"ctx {humanize_n(ctx)}/{humanize_n(cap)} ({pct}%)"
 
