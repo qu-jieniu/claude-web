@@ -20,6 +20,8 @@ or credentials are missing.
 from __future__ import annotations
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -87,13 +89,176 @@ def newest_jsonl(cwd: str) -> str | None:
     return max(files, key=os.path.getmtime) if files else None
 
 
-def session_jsonl(env: dict) -> str | None:
-    cwd = env.get("CWD")
+def screen_pid(sname: str) -> int | None:
+    try:
+        out = subprocess.check_output(["screen", "-ls"], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+    for line in out.splitlines():
+        m = re.match(r"\s*(\d+)\.(\S+)", line)
+        if m and m.group(2) == sname:
+            return int(m.group(1))
+    return None
+
+
+def find_claude_descendant(root_pid: int) -> int | None:
+    """BFS down /proc looking for a 'claude' executable in the descendants
+    of root_pid. Walks process tree by PPid in /proc/*/stat."""
+    children: dict[int, list[int]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as fp:
+                stat_line = fp.read()
+            ppid = int(stat_line.rsplit(")", 1)[1].split()[1])
+        except Exception:
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+    queue = [root_pid]
+    seen: set[int] = set()
+    while queue:
+        p = queue.pop(0)
+        if p in seen:
+            continue
+        seen.add(p)
+        for c in children.get(p, []):
+            try:
+                comm = open(f"/proc/{c}/comm").read().strip()
+            except Exception:
+                comm = ""
+            if comm == "claude":
+                return c
+            queue.append(c)
+    return None
+
+
+HISTORY_PATH = f"{HOME}/.claude/history.jsonl"
+
+
+def proc_cwd(pid: int) -> str | None:
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except Exception:
+        return None
+
+
+def latest_session_for_cwd(cwd: str) -> str | None:
+    """Walk ~/.claude/history.jsonl and return the most-recent sessionId
+    whose project field matches cwd. history.jsonl is append-only — every
+    user message writes one line — so the last matching entry is the
+    currently-active session for that cwd. Survives /clear (new sessionId
+    appended) and /exit + restart."""
+    if not os.path.exists(HISTORY_PATH):
+        return None
+    latest_sid: str | None = None
+    latest_ts = -1
+    try:
+        with open(HISTORY_PATH) as fp:
+            for line in fp:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("project") != cwd:
+                    continue
+                ts = d.get("timestamp", 0)
+                if ts > latest_ts:
+                    latest_ts = ts
+                    latest_sid = d.get("sessionId")
+    except Exception:
+        return None
+    return latest_sid
+
+
+def first_user_msg(jsonl_path: str) -> str:
+    """Read the first user message body of a JSONL, for content-sniffing.
+    Returns '' if it can't be parsed or the file has no user messages."""
+    try:
+        with open(jsonl_path) as fp:
+            for line in fp:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("type") not in ("user", "human"):
+                    continue
+                msg = d.get("message", d)
+                c = msg.get("content", "")
+                if isinstance(c, list):
+                    c = " ".join(
+                        x.get("text", "") for x in c if isinstance(x, dict)
+                    )
+                if isinstance(c, str):
+                    return c[:200]
+                return ""
+    except Exception:
+        pass
+    return ""
+
+
+def discord_router_jsonl(cwd: str) -> str | None:
+    """For sessions like claude-discord that don't write to history.jsonl
+    (their user messages come in via the Discord plugin's MCP server, not
+    the terminal), find the Discord-router JSONL by content-sniffing.
+    Discord sessions' first user message starts with <channel source=
+    "plugin:discord:discord" ...>. Pick the most recently modified
+    matching file in the project dir."""
+    pdir = project_dir_for(cwd)
+    if not os.path.isdir(pdir):
+        return None
+    candidates: list[tuple[float, str]] = []
+    for f in os.listdir(pdir):
+        if not f.endswith(".jsonl"):
+            continue
+        path = f"{pdir}/{f}"
+        first = first_user_msg(path)
+        if 'source="plugin:discord:discord"' in first:
+            try:
+                candidates.append((os.path.getmtime(path), path))
+            except Exception:
+                pass
+    if not candidates:
+        return None
+    return max(candidates)[1]
+
+
+def session_jsonl(name: str | None, env: dict | None) -> str | None:
+    """Resolve the live JSONL for this session.
+
+    Order of preference:
+    1. claude-discord special-case: sniff for the Discord-marked JSONL
+       in the project dir and pick the newest. Discord messages don't
+       write to history.jsonl, so the normal lookup would mis-identify.
+    2. Inspect the claude process inside this screen: read its cwd from
+       /proc and look up the latest sessionId for that cwd in
+       ~/.claude/history.jsonl. Tracks /clear and /exit + restart
+       correctly because history.jsonl gets a new entry on every user
+       message and we always pick the most recent.
+    3. Fall back to .env CWD + history.jsonl lookup or .env UUID pin.
+    4. Newest JSONL in the project dir — last resort."""
+    cwd: str | None = None
+    if name:
+        sp = screen_pid(name)
+        if sp is not None:
+            cp = find_claude_descendant(sp)
+            if cp is not None:
+                cwd = proc_cwd(cp)
+    if not cwd and env:
+        cwd = env.get("CWD")
     if not cwd:
         return None
-    uuid = env.get("UUID")
-    if uuid:
-        path = f"{project_dir_for(cwd)}/{uuid}.jsonl"
+    if name == "claude-discord":
+        d = discord_router_jsonl(cwd)
+        if d:
+            return d
+    sid = latest_session_for_cwd(cwd)
+    if sid:
+        path = f"{project_dir_for(cwd)}/{sid}.jsonl"
+        if os.path.exists(path):
+            return path
+    if env and env.get("UUID"):
+        path = f"{project_dir_for(cwd)}/{env['UUID']}.jsonl"
         if os.path.exists(path):
             return path
     return newest_jsonl(cwd)
@@ -103,7 +268,10 @@ def parse_ctx(jsonl_path: str) -> tuple[int | None, int | None, str | None]:
     """Returns (latest_ctx, max_ctx_ever, model). Max is tracked across the
     whole JSONL so a session that's already crossed into 1M-context territory
     keeps reporting the right threshold even after Claude auto-compacts and
-    drops the latest turn back below 200K."""
+    drops the latest turn back below 200K. `latest_ctx` skips turns with
+    zero total usage — those are interrupted/aborted turns or pure tool
+    results that don't reflect actual context size, and using them would
+    show `ctx 0/...` even on a heavily-loaded session."""
     last_ctx: int | None = None
     max_ctx = 0
     model: str | None = None
@@ -129,7 +297,8 @@ def parse_ctx(jsonl_path: str) -> tuple[int | None, int | None, str | None]:
                 if not u:
                     continue
                 ctx = turn_ctx(u)
-                last_ctx = ctx
+                if ctx > 0:
+                    last_ctx = ctx
                 if ctx > max_ctx:
                     max_ctx = ctx
                 if msg.get("model"):
@@ -226,9 +395,7 @@ def fmt_ctx(name: str | None) -> str | None:
     if not name:
         return None
     env = read_env(name)
-    if not env:
-        return "ctx -"
-    jsonl = session_jsonl(env)
+    jsonl = session_jsonl(name, env)
     if not jsonl:
         return "ctx -"
     ctx, max_ctx, _model = parse_ctx(jsonl)
