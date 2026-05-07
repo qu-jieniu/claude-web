@@ -21,6 +21,33 @@ sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_-' '_' | tr -s '_'; }
 # screen-4.9.1/display.c SetXtermOSC for the forwarding code path.
 set_title() { printf '\033]0;%s\007' "$1"; }
 
+# Per-session screenrc generator for the bottom status bar. Bakes the
+# session name into the backtick command so the claude-status script
+# knows which session to inspect (backticks run in screen's main process
+# context, not the session's, so STY-based detection wouldn't work).
+STATUS_SCRIPT="$HOME/claude-web/claude-status"
+RC_DIR="/tmp/claude-web-rc"
+generate_session_rc() {
+    local sname="$1" rc
+    mkdir -p "$RC_DIR"
+    rc="$RC_DIR/${sname}.rc"
+    {
+        printf 'source /etc/screenrc\n'
+        printf 'backtick 0 30 30 %q %q\n' "$STATUS_SCRIPT" "$sname"
+        printf 'caption always "%%S | %%\x60"\n'
+    } > "$rc"
+    printf '%s' "$rc"
+}
+
+# Idempotent retrofit for screens created before the launcher knew about
+# the status bar (or for sessions like claude-discord that come from a
+# different bootstrap). Safe to call on every attach.
+setup_status_bar() {
+    local sname="$1"
+    screen -S "$sname" -X backtick 0 30 30 "$STATUS_SCRIPT" "$sname" 2>/dev/null || true
+    screen -S "$sname" -X caption always '%S | %`' 2>/dev/null || true
+}
+
 # Per-session state for restore-on-boot. One file per screen, named
 # $STATE_DIR/<screen-name>.env, sourced by claude-web-restore. We persist cwd,
 # kind (claude/shell), and whether --dangerously-skip-permissions was used.
@@ -239,7 +266,11 @@ banner() {
     printf '           Ctrl-A [   = scroll mode (PgUp/PgDn, / and ? search, q exit)\n\n'
 }
 
-attach_session() { set_title "claude-$1"; screen -D -RR -S "claude-$1"; }
+attach_session() {
+    set_title "claude-$1"
+    setup_status_bar "claude-$1"
+    screen -D -RR -S "claude-$1"
+}
 
 screen_exists() { screen -ls 2>/dev/null | grep -q "\.$1[[:space:]]"; }
 
@@ -257,7 +288,8 @@ launch_new_screen() {
     # Ephemeral — no .env is written. Use [save] in the menu to bookmark.
     local sname="$1" cwd="$2" args="$3"
     set_title "$sname"
-    screen -S "$sname" bash -lc "cd \"$cwd\" && claude ${args}; exec \"\$SHELL\""
+    local rc; rc=$(generate_session_rc "$sname")
+    screen -c "$rc" -S "$sname" bash -lc "cd \"$cwd\" && claude ${args}; exec \"\$SHELL\""
 }
 
 # Resume a saved session (one with a .env but no live screen).
@@ -276,9 +308,10 @@ resume_saved_session() {
     local flags=""
     [ "${SKIP_PERMS:-0}" = "1" ] && flags=" --dangerously-skip-permissions"
     set_title "$sname"
+    local rc; rc=$(generate_session_rc "$sname")
     case "$KIND" in
         shell)
-            screen -S "$sname" bash -l
+            screen -c "$rc" -S "$sname" bash -l
             ;;
         claude)
             local resume_cmd
@@ -287,7 +320,7 @@ resume_saved_session() {
             else
                 resume_cmd="claude --continue${flags}"
             fi
-            screen -S "$sname" bash -lc "cd \"$CWD\" && $resume_cmd; exec \"\$SHELL\""
+            screen -c "$rc" -S "$sname" bash -lc "cd \"$CWD\" && $resume_cmd; exec \"\$SHELL\""
             capture_session_uuid "$sname" "$CWD"
             ;;
         *)
@@ -426,6 +459,7 @@ resume_specific_session() {
         echo "The existing session keeps its original UUID and flags; nothing is resumed."
         read -erp "Press Enter to attach anyway, or Ctrl-C to cancel: " _
         set_title "$sname"
+        setup_status_bar "$sname"
         screen -D -RR -S "$sname"
     else
         local flags; flags=$(prompt_skip_perms)
@@ -722,7 +756,8 @@ run_menu() {
                             local save=0; prompt_auto_save && save=1
                             [ "$save" = 1 ] && write_state "$sname" shell "$HOME" ""
                             set_title "$sname"
-                            screen -S "$sname"; return ;;
+                            local rc; rc=$(generate_session_rc "$sname")
+                            screen -c "$rc" -S "$sname"; return ;;
             pick_session)   pick_session_menu; return ;;
             kill_menu)      pick_running_menu kill kill_session; return ;;
             rename_menu)    pick_running_menu rename rename_session; return ;;

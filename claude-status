@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+Single-line status for a claude-web screen session.
+
+Usage:  claude-status <screen-name>
+
+Output (no trailing newline):
+    ctx 48k/190k (25%) │ 5h 23% (⏱ 1h42m)
+
+Designed to be invoked by screen's `backtick` directive every ~30s, so
+must be cheap. The OAuth-endpoint result is cached at /tmp/claude-status-
+oauth-cache.json with a 5-minute TTL; the network call only happens on
+cache miss. Token refresh handled automatically when the access token
+is near expiry.
+
+Returns "—" on missing inputs rather than failing — the bar should
+degrade gracefully if a session has no JSONL yet, the cache is stale,
+or credentials are missing.
+"""
+from __future__ import annotations
+import json
+import os
+import sys
+import time
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+STATE_DIR = f"{HOME}/claude-web/state/sessions"
+PROJECTS_DIR = f"{HOME}/.claude/projects"
+CRED_PATH = f"{HOME}/.claude/.credentials.json"
+CACHE_PATH = "/tmp/claude-status-oauth-cache.json"
+CACHE_TTL = 300
+
+# Private endpoint that Claude Code itself uses to surface the 5h/weekly
+# caps in its UI. Auth is the OAuth bearer token from .credentials.json.
+# Undocumented; requires the anthropic-beta header. May break — caller
+# falls back to "5h ?" if it does.
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+OAUTH_BETA = "oauth-2025-04-20"
+
+
+def humanize_n(n: int) -> str:
+    if n >= 1_000_000:
+        s = f"{n/1_000_000:.1f}M"
+        return s.replace(".0M", "M")
+    if n >= 1000:
+        return f"{n/1000:.0f}k"
+    return str(n)
+
+
+def humanize_eta(seconds: int) -> str:
+    if seconds < 0:
+        return "now"
+    h, rem = divmod(seconds, 3600)
+    m = rem // 60
+    if h:
+        return f"{h}h{m:02d}m"
+    return f"{m}m"
+
+
+def project_dir_for(cwd: str) -> str:
+    return f"{PROJECTS_DIR}/" + cwd.replace("/", "-").replace(".", "-")
+
+
+def read_env(name: str) -> dict | None:
+    path = f"{STATE_DIR}/{name}.env"
+    if not os.path.exists(path):
+        return None
+    out: dict[str, str] = {}
+    for line in open(path):
+        line = line.strip()
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[k] = v.strip("'\"")
+    return out
+
+
+def newest_jsonl(cwd: str) -> str | None:
+    pdir = project_dir_for(cwd)
+    if not os.path.isdir(pdir):
+        return None
+    files = [f"{pdir}/{f}" for f in os.listdir(pdir) if f.endswith(".jsonl")]
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def session_jsonl(env: dict) -> str | None:
+    cwd = env.get("CWD")
+    if not cwd:
+        return None
+    uuid = env.get("UUID")
+    if uuid:
+        path = f"{project_dir_for(cwd)}/{uuid}.jsonl"
+        if os.path.exists(path):
+            return path
+    return newest_jsonl(cwd)
+
+
+def parse_ctx(jsonl_path: str) -> tuple[int | None, str | None]:
+    """Latest assistant turn's input-side usage. Cache reads count toward
+    the model's context window the same as fresh input — auto-compact
+    fires on the sum, not on uncached input alone."""
+    last = None
+    try:
+        with open(jsonl_path) as fp:
+            for line in fp:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("type") == "assistant" and d.get("message", {}).get("usage"):
+                    last = d
+    except Exception:
+        return None, None
+    if not last:
+        return None, None
+    msg = last["message"]
+    u = msg.get("usage", {})
+    ctx = (
+        u.get("input_tokens", 0)
+        + u.get("cache_creation_input_tokens", 0)
+        + u.get("cache_read_input_tokens", 0)
+    )
+    return ctx, msg.get("model")
+
+
+def compact_threshold(ctx: int) -> int:
+    """Heuristic for the auto-compact trigger. Claude Code compacts at
+    ~95% of the model's context window. Without an explicit signal of
+    whether 1M-context mode is on, infer from observed ctx — anything
+    over 200K means we're already in 1M territory."""
+    return 950_000 if ctx > 200_000 else 190_000
+
+
+def load_creds() -> dict:
+    return json.load(open(CRED_PATH))["claudeAiOauth"]
+
+
+def save_creds(updated: dict) -> None:
+    full = json.load(open(CRED_PATH))
+    full["claudeAiOauth"] = updated
+    tmp = CRED_PATH + ".tmp"
+    with open(tmp, "w") as fp:
+        json.dump(full, fp, indent=2)
+    os.chmod(tmp, 0o600)
+    os.rename(tmp, CRED_PATH)
+
+
+def refresh_oauth(creds: dict) -> dict:
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": creds["refreshToken"],
+        "client_id": OAUTH_CLIENT_ID,
+    }).encode()
+    req = urllib.request.Request(OAUTH_TOKEN_URL, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        new = json.loads(r.read())
+    creds["accessToken"] = new["access_token"]
+    creds["refreshToken"] = new.get("refresh_token", creds["refreshToken"])
+    creds["expiresAt"] = int(time.time() * 1000) + new.get("expires_in", 3600) * 1000
+    save_creds(creds)
+    return creds
+
+
+def fetch_usage() -> dict:
+    creds = load_creds()
+    if creds.get("expiresAt", 0) / 1000 < time.time() + 60:
+        try:
+            creds = refresh_oauth(creds)
+        except Exception:
+            pass
+    req = urllib.request.Request(OAUTH_USAGE_URL)
+    req.add_header("Authorization", f"Bearer {creds['accessToken']}")
+    req.add_header("anthropic-beta", OAUTH_BETA)
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
+
+
+def cached_usage() -> dict | None:
+    try:
+        st = os.stat(CACHE_PATH)
+        if time.time() - st.st_mtime < CACHE_TTL:
+            return json.load(open(CACHE_PATH))
+    except FileNotFoundError:
+        pass
+    try:
+        data = fetch_usage()
+        tmp = CACHE_PATH + ".tmp"
+        with open(tmp, "w") as fp:
+            json.dump(data, fp)
+        os.rename(tmp, CACHE_PATH)
+        return data
+    except Exception:
+        try:
+            return json.load(open(CACHE_PATH))
+        except Exception:
+            return None
+
+
+def parse_iso(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def fmt_ctx(name: str | None) -> str | None:
+    if not name:
+        return None
+    env = read_env(name)
+    if not env:
+        return "ctx -"
+    jsonl = session_jsonl(env)
+    if not jsonl:
+        return "ctx -"
+    ctx, _model = parse_ctx(jsonl)
+    if ctx is None:
+        return "ctx ?"
+    cap = compact_threshold(ctx)
+    pct = round(ctx * 100 / cap)
+    return f"ctx {humanize_n(ctx)}/{humanize_n(cap)} ({pct}%)"
+
+
+def fmt_cap() -> str | None:
+    usage = cached_usage()
+    if not usage:
+        return "5h ?"
+    fh = usage.get("five_hour") or {}
+    util = round(fh.get("utilization", 0))
+    resets = fh.get("resets_at")
+    if resets:
+        try:
+            secs = int((parse_iso(resets) - datetime.now(timezone.utc)).total_seconds())
+            return f"5h {util}% (⏱ {humanize_eta(secs)})"
+        except Exception:
+            pass
+    return f"5h {util}%"
+
+
+def main() -> int:
+    name = sys.argv[1] if len(sys.argv) > 1 else None
+    parts = [p for p in (fmt_ctx(name), fmt_cap()) if p]
+    sys.stdout.write(" │ ".join(parts) if parts else "—")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

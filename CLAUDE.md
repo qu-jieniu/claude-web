@@ -115,6 +115,7 @@ Other flags (`--permission-mode plan|acceptEdits`, `--model sonnet|opus|haiku`) 
 ~/claude-web/
 ├── CLAUDE.md                    # this file
 ├── claude-launcher              # main bash launcher (source of truth, symlinked into ~/.local/bin)
+├── claude-status                # python script feeding the bottom status bar (ctx + 5h cap)
 ├── claude-discord-start         # bootstrap for the Discord router (invoked by claude-discord.service)
 ├── claude-discord-clear         # Discord channel wiper + optional router-context reset
 ├── claude-web-restore           # manual bulk re-spawner + --sync (not auto-run at boot)
@@ -311,6 +312,23 @@ To tighten: add `basic_auth` (or any other auth directive) in the Caddy block.
 - **JSONL `cwd` extraction, not filename decoding.** The encoded directory name (`/`, `.` → `-`) is lossy. Reading `cwd` from the JSONL content is reliable and matches what Claude uses internally.
 - **`claude-` prefix enforced.** Keeps the launcher's `[running]` list clean — unrelated screens (e.g., `hdd1` for backups) don't clutter the view.
 - **Custom TERM (`ttyd-256color`) instead of suppressing OSC inside screen.** Browser-tab title needed to lock to the session name and not drift to the chat topic on every Claude turn. Approach considered first — `dynamictitle off`, `hardstatus string "%S"`, `termcapinfo … hs@:ts@:fs@:ds@` — all failed because the actual forwarder is screen's compile-time `RXVT_OSC` code path (`SetXtermOSC` in `display.c`), gated only by `D_CXT`, which is set whenever the outer TERM contains "xterm"/"rxvt" or `kmous` is `\E[M`/`\E[<`. There's no runtime knob. The clean fix is to advertise a TERM that fails both tests, hence the custom terminfo: a copy of `xterm-256color` with the name changed and `kmous` stripped. Has to live under `/etc/terminfo` because `/usr/bin/screen` is setgid and glibc strips `TERMINFO`/`TERMINFO_DIRS` from its environment.
+
+## Status Bar
+
+Every `claude-*` screen renders a one-line bar at the bottom (via screen's `caption always`) showing:
+
+```
+claude-foo | ctx 48k/950k (5%) │ 5h 23% (⏱ 1h42m)
+```
+
+- **ctx X/Y (Z%)** — the latest assistant turn's input-side tokens (`input_tokens + cache_creation_input_tokens + cache_read_input_tokens` from the JSONL `usage` block) over the auto-compact threshold (~95% of the model's context window — 190K for 200K models, 950K for 1M). Heuristic: if observed ctx > 200K, assume 1M-context mode is on.
+- **5h Z% (⏱ Hh M m)** — utilization of the rolling 5-hour cap and time to reset, queried from `https://api.anthropic.com/api/oauth/usage` with the OAuth bearer token from `~/.claude/.credentials.json` and header `anthropic-beta: oauth-2025-04-20`. Same private endpoint Claude Code itself calls; **undocumented**, so it can break without notice. Result is cached at `/tmp/claude-status-oauth-cache.json` for 5 minutes; on cache miss the script refreshes (auto-refreshes the access token first if it's near expiry). On any error, the segment falls back to `5h ?` rather than crashing the bar.
+
+`~/claude-web/claude-status <screen-name>` is the script that prints the line; the launcher wires it via `screen`'s `backtick 0 30 30 …` directive (id 0, 30 s lifespan, 30 s autorefresh — `%`` in the caption format substitutes its output). The session name has to be baked into the backtick command at config time because backticks run in screen's main process context, not the session's; there's no runtime way to ask "which session is this for?".
+
+**Per-session screenrc.** New sessions launched through the launcher get this config via a generated `/tmp/claude-web-rc/<sname>.rc` (sources `/etc/screenrc`, then sets `backtick 0 …` and `caption always`) passed to screen as `-c`. Pre-existing screens (or any that escape this path, like `claude-discord` from its own bootstrap) get the same config retrofitted via `screen -X` calls in `setup_status_bar`, which the launcher invokes on every attach — idempotent, so it's safe to call repeatedly.
+
+**Caveats.** `caption always` reserves a row at the bottom, so Claude's own TUI redraws above it; expect a one-row gap between Claude's status footer and the bar. The `ctx` segment shows `ctx -` for sessions without an `.env` (no recorded UUID/CWD, e.g. unsaved shells) and `ctx ?` if the JSONL is found but contains no assistant turns yet.
 
 ## Known Issues / Limitations
 
