@@ -120,6 +120,7 @@ Other flags (`--permission-mode plan|acceptEdits`, `--model sonnet|opus|haiku`) 
 ├── claude-web-restore           # manual bulk re-spawner + --sync (not auto-run at boot)
 ├── state/sessions/*.env         # per-session state written by the launcher; consumed by restore (gitignored)
 ├── claude-web.sh                # bash alias (source of truth, symlinked into ~/.bashrc.d)
+├── ttyd-256color.src            # custom terminfo source — install to /etc/terminfo to fix browser-tab title
 └── systemd/
     ├── claude-web.service           # ttyd launcher service
     ├── claude-discord.service       # Discord router service
@@ -132,6 +133,11 @@ Suggested install (symlinks let you `git pull` and have updates take effect imme
     ~/.config/systemd/user/claude-web.service          → ~/claude-web/systemd/claude-web.service
     ~/.config/systemd/user/claude-discord.service      → ~/claude-web/systemd/claude-discord.service
     ~/.config/systemd/user/claude-web-restore.service  (optional — symlink to enable boot-time restore)
+
+One-time root step (for the browser-tab title to show the session name):
+
+    sudo install -d /etc/terminfo/t
+    sudo tic -x -o /etc/terminfo ~/claude-web/ttyd-256color.src
 ```
 
 Dependencies on the host: `ttyd` (Fedora `updates` repo), `screen`, `python3` (for JSONL `cwd` extraction), `bash` 4+ (associative arrays).
@@ -146,10 +152,11 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/ttyd -p 7682 -i 127.0.0.1 -W \
-    -t fontSize=14 -t titleFixed=claude -t disableLeaveAlert=true \
+    -T ttyd-256color -t fontSize=14 -t disableLeaveAlert=true \
     %h/.local/bin/claude-launcher
 Restart=on-failure
 RestartSec=2
+KillMode=process
 
 [Install]
 WantedBy=default.target
@@ -158,6 +165,8 @@ WantedBy=default.target
 - **User service**, not system. Requires `loginctl enable-linger $USER` to run when logged out.
 - `-i 127.0.0.1` binds ttyd to localhost only; Caddy proxies externally. Without this, ttyd would default to all interfaces and be reachable over the LAN/Tailscale directly, bypassing Caddy.
 - `-W` enables write (interactive); default is read-only.
+- `-T ttyd-256color` advertises a custom terminal type (defined in `ttyd-256color.src`, installed to `/etc/terminfo/t/`). The custom name keeps screen's `D_CXT` flag at 0, which stops it from forwarding inner programs' `\e]0;<title>\007` sequences to the outer terminal — that's what made the browser-tab title flicker to the chat topic on every Claude turn before. Without this, no `screen`-runtime config can suppress the forwarding (it's compile-time `RXVT_OSC` behavior gated on TERM containing "xterm"/"rxvt" or `kmous` being `\E[M`/`\E[<`). The launcher's `set_title` (OSC 0 before each attach) is what actually paints the title for ttyd.
+- `KillMode=process` so a `systemctl restart` only kills ttyd, not the screen daemons spawned by browser launchers. Default `control-group` would reap every `claude-*` session in the cgroup — losing in-progress work. **Don't drop this line.**
 - ttyd spawns `claude-launcher` per WebSocket connection. Each client sees its own menu; screen state is shared via named sessions on disk.
 
 **Manage:**
@@ -301,6 +310,7 @@ To tighten: add `basic_auth` (or any other auth directive) in the Caddy block.
 - **Plain bash `read`-based menu for the main screen, `select` for sub-menus.** The main menu switched away from `select` to support letter shortcuts (`s`, `n`, `p`, `v`, `r`, `k`, `f`) alongside numbers. Sub-menus keep `select` because their entries are dynamic and don't benefit from letters.
 - **JSONL `cwd` extraction, not filename decoding.** The encoded directory name (`/`, `.` → `-`) is lossy. Reading `cwd` from the JSONL content is reliable and matches what Claude uses internally.
 - **`claude-` prefix enforced.** Keeps the launcher's `[running]` list clean — unrelated screens (e.g., `hdd1` for backups) don't clutter the view.
+- **Custom TERM (`ttyd-256color`) instead of suppressing OSC inside screen.** Browser-tab title needed to lock to the session name and not drift to the chat topic on every Claude turn. Approach considered first — `dynamictitle off`, `hardstatus string "%S"`, `termcapinfo … hs@:ts@:fs@:ds@` — all failed because the actual forwarder is screen's compile-time `RXVT_OSC` code path (`SetXtermOSC` in `display.c`), gated only by `D_CXT`, which is set whenever the outer TERM contains "xterm"/"rxvt" or `kmous` is `\E[M`/`\E[<`. There's no runtime knob. The clean fix is to advertise a TERM that fails both tests, hence the custom terminfo: a copy of `xterm-256color` with the name changed and `kmous` stripped. Has to live under `/etc/terminfo` because `/usr/bin/screen` is setgid and glibc strips `TERMINFO`/`TERMINFO_DIRS` from its environment.
 
 ## Known Issues / Limitations
 
@@ -309,3 +319,4 @@ To tighten: add `basic_auth` (or any other auth directive) in the Caddy block.
 - **Screen session names only go up to ~230 chars.** Not a practical limit for us.
 - **Multiple simultaneous browser clients boot each other** due to `-D -RR`. Expected — last connection wins. `screen -x` (multi-attach) was rejected for parity with the CLI `-D -RR` flow.
 - **Mouse wheel doesn't scroll in the browser.** Inside a TUI (Claude, etc.) xterm.js translates the wheel to arrow keys, which Claude interprets as prompt-history navigation. `Shift+wheel` and `Shift+PgUp` are intercepted by xterm.js/the browser before reaching the app. Use `Ctrl-A [` (screen copy mode) for reliable scrolling, or open a second screen window (`Ctrl-A c`) to `less` the session's JSONL directly. Fighting this further (e.g. `termcapinfo xterm* ti@:te@` to disable alt-screen) just trades one problem for another — TUI redraw frames clutter the scrollback.
+- **Browser-tab title fix needs the system terminfo installed.** Without `/etc/terminfo/t/ttyd-256color`, ttyd falls back to its default and screen's OSC forwarding kicks in, so the title drifts to the chat topic each turn. Re-run the `tic` line from the Files section if a fresh host is missing it, or if `infocmp ttyd-256color` errors out.

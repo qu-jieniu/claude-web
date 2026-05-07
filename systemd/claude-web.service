@@ -4,9 +4,13 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ttyd -p 7682 -i 127.0.0.1 -W -t fontSize=14 -t titleFixed=claude -t disableLeaveAlert=true %h/.local/bin/claude-launcher
+ExecStart=/usr/bin/ttyd -p 7682 -i 127.0.0.1 -W -T ttyd-256color -t fontSize=14 -t disableLeaveAlert=true %h/.local/bin/claude-launcher
 Restart=on-failure
 RestartSec=2
+# Restart only kills ttyd; leaves browser-spawned screen daemons alone.
+# Default control-group mode would reap every claude-* session in the
+# service cgroup on every restart — losing in-progress work.
+KillMode=process
 
 [Install]
 WantedBy=default.target
