@@ -269,7 +269,7 @@ banner() {
 attach_session() {
     set_title "claude-$1"
     setup_status_bar "claude-$1"
-    screen -D -RR -S "claude-$1"
+    screen -A -D -RR -S "claude-$1"
 }
 
 screen_exists() { screen -ls 2>/dev/null | grep -q "\.$1[[:space:]]"; }
@@ -460,7 +460,7 @@ resume_specific_session() {
         read -erp "Press Enter to attach anyway, or Ctrl-C to cancel: " _
         set_title "$sname"
         setup_status_bar "$sname"
-        screen -D -RR -S "$sname"
+        screen -A -D -RR -S "$sname"
     else
         local flags; flags=$(prompt_skip_perms)
         local save=0; prompt_auto_save && save=1
