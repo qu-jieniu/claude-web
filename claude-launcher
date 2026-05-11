@@ -465,30 +465,9 @@ list_saved_sessions() {
     done | sort -t'|' -k2,2nr
 }
 
-kill_session() {
-    # Kills the running screen AND removes its restore .env. [kill] in the
-    # auto-track model means "I'm done with this" — see [forget] for
-    # removing stale .envs of sessions that died without an explicit kill.
-    local name="$1"
-    screen -S "claude-$name" -X quit 2>/dev/null || true
-    remove_state "claude-$name"
-    echo "Killed claude-$name (if it existed) and removed restore bookmark."
-    sleep 1
-}
-
-forget_saved_session() {
-    local sname="$1"  # full screen name (claude-*)
-    remove_state "$sname"
-    echo "Forgot $sname (removed $STATE_DIR/$sname.env)."
-    sleep 1
-}
-
 pick_saved_menu() {
-    # $1 = verb (e.g. "forget", "restore") — drives the prompt + empty msg
-    # $2 = callback function name, invoked as "<callback> <screen-name>"
-    local verb="$1" callback="$2"
     banner
-    echo "Restore-candidate sessions (pick one to $verb):"
+    echo "Sessions you can restore (.env exists, screen daemon isn't running):"
     echo
     local -a names=()
     local n age
@@ -499,18 +478,18 @@ pick_saved_menu() {
         names+=("$n$age_label")
     done < <(list_saved_sessions)
     if [ "${#names[@]}" -eq 0 ]; then
-        echo "(nothing to $verb — every recorded session is currently running)"
+        echo "(nothing to restore — every recorded session is currently running)"
         sleep 2; return
     fi
     names+=("cancel")
-    PS3=$'\n'"$verb which? "
+    PS3=$'\nrestore which? '
     local pick raw_name
     select pick in "${names[@]}"; do
         [ -z "${pick:-}" ] && continue
         [ "$pick" = "cancel" ] && break
         # Strip the trailing " (last active ...)" if present
         raw_name="${pick%% *}"
-        "$callback" "$raw_name"
+        resume_saved_session "$raw_name"
         break
     done
 }
@@ -796,15 +775,13 @@ run_menu() {
     if [ "${#running_map[@]}" -gt 0 ]; then
         labels+=("(r) [rename]  Rename a running session...")
         actions+=("rename_menu"); letter_map[r]=$(( ${#actions[@]} - 1 ))
-
-        labels+=("(k) [kill]    Kill a running session...")
-        actions+=("kill_menu"); letter_map[k]=$(( ${#actions[@]} - 1 ))
     fi
 
-    if [ "$saved_count" -gt 0 ]; then
-        labels+=("(f) [forget]  Remove a stale restore bookmark...")
-        actions+=("forget_menu"); letter_map[f]=$(( ${#actions[@]} - 1 ))
-    fi
+    # No menu actions for kill / forget — explicit cleanup is rare enough
+    # that the shell-only path is fine. To kill a session:
+    #   screen -S claude-X -X quit
+    # To drop a stale restore bookmark:
+    #   rm ~/claude-web/state/sessions/claude-X.env
 
     local i
     for ((i=0; i<${#labels[@]}; i++)); do
@@ -843,10 +820,8 @@ run_menu() {
                             local rc; rc=$(generate_session_rc "$sname")
                             screen -c "$rc" -S "$sname"; return ;;
             pick_session)   pick_session_menu; return ;;
-            kill_menu)      pick_running_menu kill kill_session; return ;;
             rename_menu)    pick_running_menu rename rename_session; return ;;
-            restore_menu)   pick_saved_menu restore resume_saved_session; return ;;
-            forget_menu)    pick_saved_menu forget forget_saved_session; return ;;
+            restore_menu)   pick_saved_menu; return ;;
         esac
     done
 }

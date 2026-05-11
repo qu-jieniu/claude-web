@@ -48,16 +48,16 @@ Caddy (system) ── reverse_proxy ──► ttyd (user systemd)   claude-attac
 | `(p) [pick] Resume a session...` | Submenu: pick a project → pick a session by UUID + preview text, OR `[id] Type UUID directly` for direct input (≥8-char prefix acceptable). Then screen name + skip-permissions prompt → launches `claude --resume <uuid>`. Auto-tracked. |
 | `(o) [restore] Restore a session that's no longer running...` | Always-visible submenu listing every `.env` whose screen daemon isn't running. After a reboot, every session that was running pre-shutdown is here; pick one to spawn a new screen and `--resume` it. When there's nothing to restore, the submenu shows a "every recorded session is currently running" message — visible reassurance that the feature exists. |
 | `(r) [rename] Rename a running session...` | Shown only when `claude-*` screens exist. Prompts for a new suffix, sanitizes, rejects collisions, then `screen -S <old> -X sessionname claude-<new>`. Renames the `.env` alongside. |
-| `(k) [kill] Kill a running session...` | Shown only when `claude-*` screens exist. `screen -S <name> -X quit` AND removes the `.env`. Kill = "I'm done with this" — the session won't appear under `[restore]` after this. |
-| `(f) [forget] Remove a stale restore bookmark...` | Shown only when restore candidates exist. Submenu over candidates; `rm`s the `.env`. Use this to clear sessions that died unexpectedly but you don't want back. |
 
-**Selection:** main menu accepts either the number (e.g. `3`) or the bracketed letter (e.g. `p`). Sub-menus (`[pick]`, `[restore]`, `[kill]`, `[rename]`, `[forget]`) use numbers only since their entries are dynamic.
+**Selection:** main menu accepts either the number (e.g. `3`) or the bracketed letter (e.g. `p`). Sub-menus (`[pick]`, `[restore]`, `[rename]`) use numbers only since their entries are dynamic.
+
+**No delete command:** to remove an old project history, `rm -rf ~/.claude/projects/<encoded>/` directly. Was a rarely-used menu item with an outsized mis-click cost.
+
+**No kill / forget menu items either.** Cleanup is rare enough that it doesn't merit menu real estate. To stop a running session: `screen -S claude-X -X quit` from any shell (the `.env` becomes a restore candidate). To drop a stale restore bookmark you don't want back: `rm ~/claude-web/state/sessions/claude-X.env`.
 
 **Auto-track model.** Every session created through the launcher gets a `.env` immediately (no "Save as bookmark?" prompt — that question is implicit and always "yes"). When you `[kill]` a session, the `.env` is removed alongside the screen — kill means done. If a screen dies *without* an explicit kill (system reboot, crash, OOM, `screen -X quit` from outside the launcher), its `.env` persists and the session appears under `[restore]` next time you open the menu. On every launcher invocation, `sync_existing_state` runs once to backfill `.env`s for any running screens that don't have one yet — so screens spawned outside the launcher (or before this model existed) also get pulled into auto-tracking.
 
 **Exit:** `Ctrl-D` at the `>` prompt exits the launcher (browser closes the connection; CLI returns to parent shell). `Ctrl-C` also works. No `[quit]` entry — redundant.
-
-**No delete command:** to remove an old project history, `rm -rf ~/.claude/projects/<encoded>/` directly. Was a rarely-used menu item with an outsized mis-click cost.
 
 **Naming convention:** every screen name is `claude-<suffix>`. The `claude-` prefix is enforced by `prompt_screen_name`; user only picks the suffix. Sanitized to `[a-zA-Z0-9_-]`.
 
