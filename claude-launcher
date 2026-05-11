@@ -466,41 +466,13 @@ list_saved_sessions() {
 }
 
 kill_session() {
-    # Kills the running screen. Leaves any saved .env intact (use [forget] to remove).
+    # Kills the running screen AND removes its restore .env. [kill] in the
+    # auto-track model means "I'm done with this" — see [forget] for
+    # removing stale .envs of sessions that died without an explicit kill.
     local name="$1"
     screen -S "claude-$name" -X quit 2>/dev/null || true
-    echo "Killed claude-$name (if it existed)."
-    sleep 1
-}
-
-# [save] — bookmark a running screen for later resume. Writes state/sessions/<name>.env
-# capturing kind (claude/shell), cwd (from /proc/<child-bash>/cwd), skip_perms (prompted),
-# and UUID (from the newest JSONL in the project dir).
-save_session() {
-    local name="$1"           # screen suffix, e.g. "home"
-    local sname="claude-$name"
-    local pid bash_pid cwd kind
-    pid=$(screen -ls 2>/dev/null | grep "\.$sname[[:space:]]" | head -1 | awk -F. '{print $1}' | tr -d '[:space:]')
-    if [ -z "$pid" ]; then echo "screen $sname not found"; sleep 1; return 1; fi
-    bash_pid=$(pgrep -P "$pid" -n 2>/dev/null | head -1)
-    cwd=$(readlink "/proc/$bash_pid/cwd" 2>/dev/null)
-    if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then cwd="$HOME"; fi
-    if pstree -p "$pid" 2>/dev/null | grep -q 'claude('; then kind=claude; else kind=shell; fi
-
-    local flags=""
-    if [ "$kind" = "claude" ]; then
-        local ans
-        read -erp "Save with --dangerously-skip-permissions? [y/N]: " ans
-        case "${ans,,}" in y|yes) flags=" --dangerously-skip-permissions" ;; esac
-    fi
-
-    if [ -f "$STATE_DIR/$sname.env" ]; then
-        echo "(overwriting existing save for $sname)"
-    fi
-    write_state "$sname" "$kind" "$cwd" "$flags"
-    [ "$kind" = "claude" ] && capture_session_uuid "$sname" "$cwd"
-
-    echo "Saved $sname (kind=$kind, cwd=$cwd)."
+    remove_state "claude-$name"
+    echo "Killed claude-$name (if it existed) and removed restore bookmark."
     sleep 1
 }
 
@@ -576,10 +548,9 @@ resume_specific_session() {
         screen -A -D -RR -S "$sname"
     else
         local flags; flags=$(prompt_skip_perms)
-        local save=0; prompt_auto_save && save=1
-        [ "$save" = 1 ] && write_state "$sname" claude "$cwd" "$flags"
+        write_state "$sname" claude "$cwd" "$flags"
         launch_new_screen "$sname" "$cwd" "--resume $uuid${flags}"
-        [ "$save" = 1 ] && capture_session_uuid "$sname" "$cwd"
+        capture_session_uuid "$sname" "$cwd"
     fi
 }
 
@@ -692,13 +663,6 @@ prompt_skip_perms() {
     esac
 }
 
-# Returns 0 if user wants this session bookmarked, 1 otherwise.
-prompt_auto_save() {
-    local ans
-    read -erp "Save as bookmark for later resume? [y/N]: " ans
-    case "${ans,,}" in y|yes) return 0 ;; *) return 1 ;; esac
-}
-
 prompt_custom_path() {
     local p default n sname ans
     read -erp "Path (Tab to complete): " p || return 1
@@ -720,10 +684,9 @@ prompt_custom_path() {
         echo "A screen named $sname already exists. Pick another name."; sleep 2; return 1
     fi
     local flags; flags=$(prompt_skip_perms)
-    local save=0; prompt_auto_save && save=1
-    [ "$save" = 1 ] && write_state "$sname" claude "$p" "$flags"
+    write_state "$sname" claude "$p" "$flags"
     launch_new_screen "$sname" "$p" "$flags"
-    [ "$save" = 1 ] && capture_session_uuid "$sname" "$p"
+    capture_session_uuid "$sname" "$p"
 }
 
 pick_running_menu() {
@@ -755,9 +718,12 @@ pick_running_menu() {
 
 run_menu() {
     banner
-    # No auto-sync: sessions are ephemeral unless explicitly saved via [save].
-    # The --sync flag on ~/claude-web/claude-web-restore is still available for
-    # one-shot migration of pre-existing screens.
+    # Auto-track: every running screen should have a .env. This catches
+    # screens spawned outside the launcher (e.g. via the old explicit-save
+    # workflow, or a manual `screen -S ...`) and brings them under the
+    # restore-on-shutdown model. Cheap to run — it's a one-pass scan over
+    # screen -ls, skipping already-recorded entries.
+    sync_existing_state
 
     local -a labels=() actions=()
     local -A letter_map=()  # letter -> action index
@@ -804,7 +770,7 @@ run_menu() {
         [ -z "$saved_name" ] && continue
         local age_label=""
         [ "$saved_mtime" -gt 0 ] && age_label=", last active $(time_ago "$saved_mtime")"
-        labels+=("[saved]   $saved_name$age_label")
+        labels+=("[restore] $saved_name$age_label")
         actions+=("resume_saved:$saved_name")
         saved_count=$((saved_count + 1))
     done < <(list_saved_sessions)
@@ -819,9 +785,6 @@ run_menu() {
     actions+=("pick_session"); letter_map[p]=$(( ${#actions[@]} - 1 ))
 
     if [ "${#running_map[@]}" -gt 0 ]; then
-        labels+=("(v) [save]    Bookmark a running session for later resume...")
-        actions+=("save_menu"); letter_map[v]=$(( ${#actions[@]} - 1 ))
-
         labels+=("(r) [rename]  Rename a running session...")
         actions+=("rename_menu"); letter_map[r]=$(( ${#actions[@]} - 1 ))
 
@@ -830,7 +793,7 @@ run_menu() {
     fi
 
     if [ "$saved_count" -gt 0 ]; then
-        labels+=("(f) [forget]  Remove a saved session (.env only)...")
+        labels+=("(f) [forget]  Remove a stale restore bookmark...")
         actions+=("forget_menu"); letter_map[f]=$(( ${#actions[@]} - 1 ))
     fi
 
@@ -866,15 +829,13 @@ run_menu() {
             resume_saved:*) resume_saved_session "${action#resume_saved:}"; return ;;
             custom)         prompt_custom_path; return ;;
             shell)          local sname="claude-$(next_shell_name)"
-                            local save=0; prompt_auto_save && save=1
-                            [ "$save" = 1 ] && write_state "$sname" shell "$HOME" ""
+                            write_state "$sname" shell "$HOME" ""
                             set_title "$sname"
                             local rc; rc=$(generate_session_rc "$sname")
                             screen -c "$rc" -S "$sname"; return ;;
             pick_session)   pick_session_menu; return ;;
             kill_menu)      pick_running_menu kill kill_session; return ;;
             rename_menu)    pick_running_menu rename rename_session; return ;;
-            save_menu)      pick_running_menu save save_session; return ;;
             forget_menu)    pick_saved_menu; return ;;
         esac
     done

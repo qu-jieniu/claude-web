@@ -42,17 +42,18 @@ Caddy (system) ── reverse_proxy ──► ttyd (user systemd)   claude-attac
 
 | Option | Action |
 |---|---|
-| `[running] claude-X (attached/detached, Nm ago)` | Attach to an existing screen (boots any other attached client via `-D -RR`). Shown once per live `claude-*` session (including shells), sorted by creation time newest-first. Number-only selection (no letter shortcut — they're dynamic). |
-| `[saved] claude-X (last active Nm ago)` | Saved bookmark (`.env` exists, no live screen). Picking one spawns a new screen and resumes via `claude --resume <UUID>` (or `--continue` if no UUID recorded). "Last active" comes from the newest JSONL mtime in the session's project dir. |
-| `(s) [shell] New plain terminal` | Always creates a fresh `claude-shell-N` (auto-numbered: `claude-shell`, `claude-shell-2`, …) — a plain bash session, no Claude. Ephemeral — use `[save]` to bookmark. Existing shells are reachable via the `[running]` list. |
-| `(n) [new] Start in custom path...` | Prompts for path (Tab-completes via readline; missing paths prompt Y/n to `mkdir -p`) → screen name (default = path basename) → skip-permissions y/N → launches plain `claude`. Ephemeral until `[save]`d. |
-| `(p) [pick] Resume a session...` | Submenu: pick a project → pick a session by UUID + preview text, OR `[id] Type UUID directly` for direct input (≥8-char prefix acceptable). Then screen name + skip-permissions prompt → launches `claude --resume <uuid>`. Ephemeral until `[save]`d. |
-| `(v) [save] Bookmark a running session...` | Shown only when `claude-*` screens exist. Submenu over live screens. Reads cwd from `/proc/<child-bash>/cwd`, infers kind from `pstree`, prompts for skip-perms, writes `state/sessions/<name>.env` with `UUID=` captured from the newest JSONL. Idempotent — overwrites any prior save. |
-| `(r) [rename] Rename a running session...` | Shown only when `claude-*` screens exist. Prompts for a new suffix, sanitizes, rejects collisions, then `screen -S <old> -X sessionname claude-<new>`. Renames any associated `.env` alongside. |
-| `(k) [kill] Kill a running session...` | Shown only when `claude-*` screens exist. `screen -S <name> -X quit`. **Does not remove the `.env`** — bookmarks survive kill by design (use `[forget]`). |
-| `(f) [forget] Remove a saved session...` | Shown only when `[saved]` entries exist. Submenu over saved bookmarks; `rm`s the `.env`. Does not touch any running screen. |
+| `[running] claude-X (attached/detached, Nm ago)` | Attach to an existing screen (boots any other attached client via `-A -D -RR`). Shown once per live `claude-*` session (including shells), sorted by creation time newest-first. Number-only selection (no letter shortcut — they're dynamic). |
+| `[restore] claude-X (last active Nm ago)` | A `.env` exists for a session that's not currently running — typically because the system was shut down or the screen died unexpectedly. Picking one spawns a new screen and resumes via `claude --resume <UUID>` (or `--continue` if no UUID recorded). "Last active" comes from the newest JSONL mtime in the session's project dir. |
+| `(s) [shell] New plain terminal` | Always creates a fresh `claude-shell-N` (auto-numbered: `claude-shell`, `claude-shell-2`, …) — a plain bash session, no Claude. Auto-tracked: `.env` is written immediately, restores after reboot. |
+| `(n) [new] Start in custom path...` | Prompts for path (Tab-completes via readline; missing paths prompt Y/n to `mkdir -p`) → screen name (default = path basename) → skip-permissions y/N → launches plain `claude`. Auto-tracked. |
+| `(p) [pick] Resume a session...` | Submenu: pick a project → pick a session by UUID + preview text, OR `[id] Type UUID directly` for direct input (≥8-char prefix acceptable). Then screen name + skip-permissions prompt → launches `claude --resume <uuid>`. Auto-tracked. |
+| `(r) [rename] Rename a running session...` | Shown only when `claude-*` screens exist. Prompts for a new suffix, sanitizes, rejects collisions, then `screen -S <old> -X sessionname claude-<new>`. Renames the `.env` alongside. |
+| `(k) [kill] Kill a running session...` | Shown only when `claude-*` screens exist. `screen -S <name> -X quit` AND removes the `.env`. Kill = "I'm done with this" — the session won't appear under `[restore]` after this. |
+| `(f) [forget] Remove a stale restore bookmark...` | Shown only when `[restore]` entries exist. Submenu over restore candidates; `rm`s the `.env`. Use this to clear sessions that died unexpectedly but you don't want back. |
 
-**Selection:** main menu accepts either the number (e.g. `3`) or the bracketed letter (e.g. `p`). Sub-menus (`[pick]`, `[save]`, `[kill]`, `[rename]`, `[forget]`) use numbers only since their entries are dynamic.
+**Selection:** main menu accepts either the number (e.g. `3`) or the bracketed letter (e.g. `p`). Sub-menus (`[pick]`, `[kill]`, `[rename]`, `[forget]`) use numbers only since their entries are dynamic.
+
+**Auto-track model.** Every session created through the launcher gets a `.env` immediately (no "Save as bookmark?" prompt — that question is implicit and always "yes"). When you `[kill]` a session, the `.env` is removed alongside the screen — kill means done. If a screen dies *without* an explicit kill (system reboot, crash, OOM, `screen -X quit` from outside the launcher), its `.env` persists and the session appears under `[restore]` next time you open the menu. On every launcher invocation, `sync_existing_state` runs once to backfill `.env`s for any running screens that don't have one yet — so screens spawned outside the launcher (or before this model existed) also get pulled into auto-tracking.
 
 **Exit:** `Ctrl-D` at the `>` prompt exits the launcher (browser closes the connection; CLI returns to parent shell). `Ctrl-C` also works. No `[quit]` entry — redundant.
 
@@ -68,7 +69,7 @@ Caddy (system) ── reverse_proxy ──► ttyd (user systemd)   claude-attac
 
 **Screen keybindings cheat-sheet** is printed at the top of every menu redraw: `Ctrl-A d` (detach), `Ctrl-A a d` (detach an inner nested screen — the `a` forwards a literal `Ctrl-A` past the outer screen), and `Ctrl-A [` (copy/scroll mode: PgUp/PgDn to navigate, `/` and `?` to search, `q` to exit). `Ctrl-A [` is the reliable way to scroll back through terminal output in the browser — mouse wheel inside a TUI is forwarded to the app as arrow keys by xterm.js, not used for scrolling.
 
-**Sub-menus re-banner:** `[pick]`, `[save]`, `[kill]`, `[rename]`, and `[forget]` call `banner` at entry so scrollback stays clean across long sessions.
+**Sub-menus re-banner:** `[pick]`, `[kill]`, `[rename]`, and `[forget]` call `banner` at entry so scrollback stays clean across long sessions.
 
 ## Shell Integration
 
@@ -88,24 +89,16 @@ The launcher reads `~/.claude/projects/` to build the `[pick]` project list. Eac
 
 ## Flag Prompt
 
-`[new]`, `[pick]`, and `[save]` all prompt:
+`[new]` and `[pick]` prompt:
 
 ```
 Skip permissions (--dangerously-skip-permissions)? [y/N]:
 ```
 
-- For `[new]` / `[pick]`: `y` → appends `--dangerously-skip-permissions` to the claude command inside screen.
-- For `[save]`: records the answer as `SKIP_PERMS=1` in the `.env`, used when the bookmark is later resumed.
+- `y` → appends `--dangerously-skip-permissions` to the claude command AND records `SKIP_PERMS=1` in the auto-written `.env` so the same flag applies on restore.
 - Any other input → plain launch / `SKIP_PERMS=0`.
 
-`[new]`, `[pick]`, and `[shell]` additionally prompt:
-
-```
-Save as bookmark for later resume? [y/N]:
-```
-
-`y` writes the `.env` immediately (same format as `[save]`), so the session shows up under `[saved]` after it's killed or on next boot — no need to remember `[save]` later. `n` keeps the session ephemeral. For `[pick]` / `[new]`, `UUID=` is captured post-detach; for `[shell]`, only KIND/CWD are recorded (shells have no JSONL).
-- Attaching to an already-running screen in `[pick]` skips the prompt (existing session's mode is fixed). The launcher prints a warning first ("screen X already exists — attaching instead of resuming") and waits for Enter, since the existing session keeps its original UUID and flags rather than resuming the one you picked.
+There's no "Save as bookmark?" prompt anymore — every session auto-tracks. For `[pick]` / `[new]`, `UUID=` is captured post-detach; for `[shell]`, only KIND/CWD are recorded (shells have no JSONL). Attaching to an already-running screen in `[pick]` skips the prompt (existing session's mode is fixed). The launcher prints a warning first ("screen X already exists — attaching instead of resuming") and waits for Enter, since the existing session keeps its original UUID and flags rather than resuming the one you picked.
 
 Other flags (`--permission-mode plan|acceptEdits`, `--model sonnet|opus|haiku`) are not prompted — add by hand if needed, or use `/add-dir`, `/model`, etc. as in-session slash commands.
 
@@ -197,30 +190,28 @@ UUID=ba2befe2-88a3-4750-9ce2-ba10ed1ad731
 **Launcher lifecycle hooks** (in `claude-launcher`):
 - `launch_new_screen` → runs the screen; `.env` is written before launch only if `[new]`/`[pick]` caller answered `y` to the save prompt, and `capture_session_uuid` runs post-detach.
 - Shell case in `run_menu` → prompts for save; `y` writes a shell `.env` before the screen starts.
-- `[save]` in the menu → bookmarks a running screen. Prompts for `--dangerously-skip-permissions`, reads cwd from `/proc/<child-bash-pid>/cwd`, infers kind from `pstree`, writes the `.env`, and captures the UUID from the newest JSONL in the project dir.
-- `resume_saved_session` → the `[saved]` menu action; spawns the screen with `--resume <UUID>` (or `--continue`), then refreshes UUID.
-- `[kill]` → kills the screen only; the `.env` bookmark is preserved.
-- `[forget]` → removes the `.env` bookmark; does not touch any running screen.
-- `rename_session` → renames the `.env` alongside the screen (if the `.env` exists).
+- `launch_new_screen` / `prompt_custom_path` / `resume_specific_session` / shell branch → write the `.env` unconditionally before launching the screen, then `capture_session_uuid` runs post-detach for claude sessions.
+- `sync_existing_state` → runs once at the top of every `run_menu` invocation. Walks `screen -ls`, writes `.env`s for any live `claude-*` screen that doesn't have one yet. Idempotent. Skips `claude-discord` (systemd-managed bootstrap; auto-restoring via `claude --continue` would skip the Discord plugin setup).
+- `resume_saved_session` → the `[restore]` menu action; spawns the screen with `--resume <UUID>` (or `--continue`), then refreshes UUID.
+- `[kill]` → kills the screen AND removes the `.env`. Kill = "done with this."
+- `[forget]` → removes the `.env` without touching any running screen. Used to drop stale `[restore]` entries you don't want back.
+- `rename_session` → renames the `.env` alongside the screen.
 
-**Explicit save, not auto-save.** Sessions don't persist across reboots by default. You decide what's worth keeping: work on something, hit `[save]`, it now has a `.env` and shows up in `[saved]` after the screen is gone. Transient sessions (quick one-offs, exploration) vanish when killed, no cleanup needed.
+**Auto-track, lazy restore.** Every session created (or detected at menu open) has a `.env`. On clean shutdown / unexpected death / reboot, the `.env` survives — so the `[restore]` list always reflects "things that were running but aren't now." Restoring is per-session, not bulk: each claude process is ~200–300 MB RSS, so resurrecting all at boot would burn memory on sessions you don't open. Discord is the sole always-on exception (managed by its own systemd unit because the bot connection must be live at all times).
 
-**One-shot migration** for pre-existing screens created outside the launcher: `~/claude-web/claude-web-restore --sync` — walks live `claude-*` screens and writes `.env`s for any missing, using `/proc` to recover kind + cwd. Skips `claude-discord` (systemd-managed). Useful once; after that, use `[save]` for individual sessions.
+**Previous design (replaced):** Sessions used to be ephemeral by default with an explicit `[save]` action and a "Save as bookmark?" prompt on creation. `[kill]` deliberately *kept* the `.env`; `[forget]` was the only way to drop a bookmark. Worked but required remembering to save anything worth keeping — and the user's 12-running-screens / 1-saved-`.env` state was the clear signal that explicit-save was the wrong default for this workflow.
 
-**Why lazy resume instead of boot-time auto-restore?** Each claude process is ~200–300 MB RSS; auto-resurrecting 9 sessions on every boot burns memory for ones you don't open. Lazy resume keeps the `.env` catalog, but treats sessions as "available, not running." Discord remains the sole exception because it's actually always-on (one connection per bot token; the router must be live at all times).
-
-**Previous design:** `claude-web-restore.service` (oneshot, `After=claude-web.service`) used to re-spawn every `.env` at boot, with a `systemd-run --user --scope --collect` wrapper to escape the service's cgroup (default `KillMode=control-group` would have reaped every detached screen seconds after the oneshot exited). The service is now disabled; the `claude-web-restore` script still exists for `--sync` and manual bulk-resume, and can be re-enabled via `systemctl --user enable ~/claude-web/systemd/claude-web-restore.service` if you change your mind.
+**Previous design (older):** `claude-web-restore.service` (oneshot, `After=claude-web.service`) used to re-spawn every `.env` at boot, with a `systemd-run --user --scope --collect` wrapper to escape the service's cgroup (default `KillMode=control-group` would have reaped every detached screen seconds after the oneshot exited). The service is still disabled; the `claude-web-restore` script still exists for manual bulk-resume from the command line, and can be re-enabled if you ever want boot-time auto-restore.
 
 **Ops:**
-- Forget a session: `rm ~/claude-web/state/sessions/<name>.env` — it disappears from `[saved]`.
+- Drop a restore entry: `rm ~/claude-web/state/sessions/<name>.env` (or `[forget]` from the menu).
 - Manual bulk resume (everything at once): `~/claude-web/claude-web-restore` — idempotent, skips live screens.
 - Dry-run: `ls ~/claude-web/state/sessions/` + `cat` any `.env`.
 
 **Limitations:**
-- `[save]` prompts for skip-perms rather than inferring from `/proc/*/cmdline` — parsing is unreliable. Your answer is what gets recorded.
-- Multi-session same-cwd collision: with `UUID=` set, each saved session resumes its own JSONL cleanly. A session without `UUID=` (e.g., migrated via `--sync`) falls back to `--continue`; two `--continue`s sharing a cwd will race on the most-recent-JSONL rule.
-- Saved shells restore only name + cwd. In-memory history and running processes are gone — that's how shells work.
-- If you reboot before hitting `[save]`, the running session is lost. JSONL content is still on disk and findable via `[pick]`, but screen identity (name, flags, continuity) is gone.
+- SKIP_PERMS is whatever the user answered at session creation. `sync_existing_state` (the auto-backfill) can't reliably read this from `/proc/*/cmdline` — it defaults to `0` for backfilled entries.
+- Multi-session same-cwd collision: with `UUID=` set, each session resumes its own JSONL cleanly. A session without `UUID=` (e.g. one auto-backfilled by `sync_existing_state`) falls back to `--continue`; two `--continue`s sharing a cwd will race on the most-recent-JSONL rule.
+- Shells restore only name + cwd. In-memory history and running processes are gone — that's how shells work.
 
 ## Discord Router Session
 
@@ -305,7 +296,7 @@ To tighten: add `basic_auth` (or any other auth directive) in the Caddy block.
 - **One screen per project, not one screen with windows.** Independent session lifetimes — one crash/kill doesn't nuke others; surgical `[kill]` works; `screen -ls` is authoritative. Costs: switching between projects requires detach → pick in launcher → reattach (two keystrokes, acceptable for 2–5 concurrent sessions).
 - **screen, not tmux.** Familiarity with keybindings. tmux would be objectively cleaner (better scripting API, `new-session -A`, saner resize, mouse scroll-back) but not worth the retraining cost for this workflow.
 - **Lazy resume, not boot-time auto-restore.** On boot, nothing is auto-started (except the Discord router). Each saved session is re-spawned on demand when you pick it in `[saved]` — ~2s cost. Avoids paying ~200–300 MB per idle `claude` process for sessions you don't actually open. Also sidesteps a cgroup-escape workaround the old oneshot-service design needed.
-- **Explicit save, not implicit tracking.** Sessions are ephemeral by default; `[save]` is the verb that turns a running screen into a persistent bookmark. No auto-sync walks live screens writing `.env`s behind your back. You curate the `[saved]` list yourself — "come back to this later" is opt-in, not default. Tradeoff: quick one-offs vanish cleanly on kill; important sessions need an explicit save before you lose them.
+- **Auto-track on create, kill = forget.** Every session created through the launcher writes its `.env` immediately, and `[kill]` removes it. The `[restore]` list reflects "things that were running but aren't now" — so a power outage, OOM, or `screen -X quit` from outside the launcher always leaves a restore candidate, but explicit `[kill]` doesn't. Tradeoff: more `.env` churn than the previous explicit-save model, but matches the real user behavior of "I want my work back after a reboot" without needing to remember to save anything. Sessions left running across a reboot all show under `[restore]` for one-by-one revival.
 - **`[kill]` does not remove bookmarks; `[forget]` does.** Semantic split: kill = terminate the running instance, forget = drop the bookmark. Covers the case where you want to close a session for now but come back tomorrow.
 - **`UUID=` pin in `.env`, refreshed on every resume.** Records the exact session UUID to avoid the `--continue` "most-recent-JSONL-in-cwd wins" race when multiple sessions share a project dir. Refresh on resume protects against `--resume` forking from a stale JSONL — the `.env`'s UUID always reflects the latest session state.
 - **Plain bash `read`-based menu for the main screen, `select` for sub-menus.** The main menu switched away from `select` to support letter shortcuts (`s`, `n`, `p`, `v`, `r`, `k`, `f`) alongside numbers. Sub-menus keep `select` because their entries are dynamic and don't benefit from letters.
