@@ -484,25 +484,33 @@ forget_saved_session() {
 }
 
 pick_saved_menu() {
+    # $1 = verb (e.g. "forget", "restore") — drives the prompt + empty msg
+    # $2 = callback function name, invoked as "<callback> <screen-name>"
+    local verb="$1" callback="$2"
     banner
-    echo "Saved sessions (pick one to forget):"
+    echo "Restore-candidate sessions (pick one to $verb):"
     echo
     local -a names=()
-    local n
-    while IFS='|' read -r n _; do
+    local n age
+    while IFS='|' read -r n age; do
         [ -z "$n" ] && continue
-        names+=("$n")
+        local age_label=""
+        [ "$age" -gt 0 ] && age_label="  (last active $(time_ago "$age"))"
+        names+=("$n$age_label")
     done < <(list_saved_sessions)
     if [ "${#names[@]}" -eq 0 ]; then
-        echo "(no saved sessions to forget)"; sleep 1; return
+        echo "(nothing to $verb — every recorded session is currently running)"
+        sleep 2; return
     fi
     names+=("cancel")
-    PS3=$'\nforget which? '
-    local pick
+    PS3=$'\n'"$verb which? "
+    local pick raw_name
     select pick in "${names[@]}"; do
         [ -z "${pick:-}" ] && continue
         [ "$pick" = "cancel" ] && break
-        forget_saved_session "$pick"
+        # Strip the trailing " (last active ...)" if present
+        raw_name="${pick%% *}"
+        "$callback" "$raw_name"
         break
     done
 }
@@ -763,17 +771,11 @@ run_menu() {
         actions+=("attach:$n")
     done
 
-    # Saved sessions: .env exists, screen doesn't. Picking one resumes it.
-    local saved_name saved_mtime
-    local saved_count=0
-    while IFS='|' read -r saved_name saved_mtime; do
-        [ -z "$saved_name" ] && continue
-        local age_label=""
-        [ "$saved_mtime" -gt 0 ] && age_label=", last active $(time_ago "$saved_mtime")"
-        labels+=("[restore] $saved_name$age_label")
-        actions+=("resume_saved:$saved_name")
-        saved_count=$((saved_count + 1))
-    done < <(list_saved_sessions)
+    # Count restore candidates (.env exists but screen daemon is not running)
+    # so we can conditionally show the [forget] button. The candidates
+    # themselves are NOT listed inline — they live in the [restore] submenu.
+    local saved_count
+    saved_count=$(list_saved_sessions | grep -c .)
 
     labels+=("(s) [shell]   New plain terminal (claude-shell-N)")
     actions+=("shell"); letter_map[s]=$(( ${#actions[@]} - 1 ))
@@ -783,6 +785,13 @@ run_menu() {
 
     labels+=("(p) [pick]    Resume a session...")
     actions+=("pick_session"); letter_map[p]=$(( ${#actions[@]} - 1 ))
+
+    # [restore] button always visible — gives "where do I bring back a session
+    # after reboot?" a discoverable home even when no candidates currently
+    # exist. The submenu itself shows an "(nothing to restore — every recorded
+    # session is currently running)" message in that case.
+    labels+=("(o) [restore] Restore a session that's no longer running...")
+    actions+=("restore_menu"); letter_map[o]=$(( ${#actions[@]} - 1 ))
 
     if [ "${#running_map[@]}" -gt 0 ]; then
         labels+=("(r) [rename]  Rename a running session...")
@@ -836,7 +845,8 @@ run_menu() {
             pick_session)   pick_session_menu; return ;;
             kill_menu)      pick_running_menu kill kill_session; return ;;
             rename_menu)    pick_running_menu rename rename_session; return ;;
-            forget_menu)    pick_saved_menu; return ;;
+            restore_menu)   pick_saved_menu restore resume_saved_session; return ;;
+            forget_menu)    pick_saved_menu forget forget_saved_session; return ;;
         esac
     done
 }
