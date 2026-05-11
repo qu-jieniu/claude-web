@@ -204,8 +204,11 @@ PY
 
 list_running_detailed() {
     # Emits: name|pid|state(A/D)|start_epoch
-    local line pid name state etimes start now
-    now=$(date +%s)
+    local now; now=$(date +%s)
+
+    # First pass: parse screen -ls into pid|name|state and collect pids
+    local -a rows=()
+    local pids="" line pid name state
     while IFS= read -r line; do
         [[ "$line" =~ ([0-9]+)\.claude-([^[:space:]]+).*\(([A-Za-z]+)\) ]] || continue
         pid="${BASH_REMATCH[1]}"
@@ -216,43 +219,153 @@ list_running_detailed() {
             Dead) state="X" ;;
             *) state="?" ;;
         esac
-        etimes=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
-        if [[ "$etimes" =~ ^[0-9]+$ ]]; then
-            start=$(( now - etimes ))
-        else
-            start=0
-        fi
-        printf '%s|%s|%s|%s\n' "$name" "$pid" "$state" "$start"
+        rows+=("$name|$pid|$state")
+        pids+=" $pid"
     done < <(screen -ls 2>/dev/null)
+
+    [ ${#rows[@]} -eq 0 ] && return
+
+    # Second pass: ONE ps call for all pids — ~12x faster than per-screen fork
+    # at ~10 screens, since each fork+exec dominates over the actual work.
+    local -A etimes_by_pid=()
+    local p e
+    while read -r p e; do
+        [[ "$p" =~ ^[0-9]+$ ]] && [[ "$e" =~ ^[0-9]+$ ]] && etimes_by_pid[$p]=$e
+    done < <(ps -o pid=,etimes= -p $pids 2>/dev/null)
+
+    # Emit final rows with computed start_epoch
+    local row e start
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name pid state <<< "$row"
+        e="${etimes_by_pid[$pid]:-0}"
+        start=$(( now - e ))
+        printf '%s|%s|%s|%s\n' "$name" "$pid" "$state" "$start"
+    done
 }
 
 list_projects() {
-    local dir newest cwd mtime name
-    for dir in "$PROJECTS_DIR"/*/; do
-        [ -d "$dir" ] || continue
-        newest=$(ls -t "$dir"*.jsonl 2>/dev/null | head -1)
-        [ -z "$newest" ] && continue
-        cwd=$(extract_cwd "$newest")
-        [ -z "$cwd" ] && continue
-        [ -d "$cwd" ] || continue
-        mtime=$(stat -c %Y "$newest" 2>/dev/null || echo 0)
-        name=$(short_name_for "$cwd")
-        printf '%s|%s|%s|%s\n' "$name" "$cwd" "$mtime" "${dir%/}"
-    done | sort -t'|' -k3,3nr
+    # Single Python pass over all project dirs — replaces what used to be
+    # 39× per-project Python subprocesses (one per `extract_cwd` call) that
+    # together took ~3.7s on a real workload. The hot loop is reading the
+    # first non-empty line of the newest JSONL in each dir, so it's the
+    # subprocess-startup cost that dominated, not the actual work.
+    python3 - "$PROJECTS_DIR" "$HOME" <<'PY'
+import json, os, re, sys
+projects_dir, home = sys.argv[1], sys.argv[2]
+
+def sanitize(s):
+    return re.sub(r'_+', '_', re.sub(r'[^a-zA-Z0-9_-]', '_', s))
+
+def short_name(cwd):
+    if cwd == home: return 'home'
+    base = sanitize(os.path.basename(cwd))
+    if base.startswith('claude-'):
+        base = base[len('claude-'):]
+    return base or 'session'
+
+def newest_jsonl(pdir):
+    best = None
+    best_m = -1
+    try:
+        for f in os.listdir(pdir):
+            if not f.endswith('.jsonl'): continue
+            p = f"{pdir}/{f}"
+            try: m = os.path.getmtime(p)
+            except OSError: continue
+            if m > best_m:
+                best_m, best = m, p
+    except OSError:
+        pass
+    return best, best_m
+
+def extract_cwd(path):
+    try:
+        with open(path) as fp:
+            for line in fp:
+                line = line.strip()
+                if not line: continue
+                try: d = json.loads(line)
+                except Exception: continue
+                if isinstance(d, dict) and 'cwd' in d:
+                    return d['cwd']
+    except Exception:
+        pass
+    return None
+
+rows = []
+try:
+    entries = os.listdir(projects_dir)
+except OSError:
+    sys.exit(0)
+for entry in entries:
+    pdir = f"{projects_dir}/{entry}"
+    if not os.path.isdir(pdir): continue
+    newest, mtime = newest_jsonl(pdir)
+    if newest is None: continue
+    cwd = extract_cwd(newest)
+    if not cwd or not os.path.isdir(cwd): continue
+    rows.append((short_name(cwd), cwd, int(mtime), pdir))
+
+rows.sort(key=lambda r: -r[2])
+for r in rows:
+    print('|'.join(str(x) for x in r))
+PY
 }
 
 list_sessions_in() {
     # Sessions in a project dir, sorted newest-first.
     # Output: uuid|mtime|first-user-msg
-    local pdir="$1" f uuid mtime preview
-    for f in "$pdir"/*.jsonl; do
-        [ -f "$f" ] || continue
-        uuid=$(basename "$f" .jsonl)
-        mtime=$(stat -c %Y "$f" 2>/dev/null || echo 0)
-        preview=$(extract_first_user_msg "$f")
-        [ -z "$preview" ] && preview="(no user messages)"
-        printf '%s|%s|%s\n' "$uuid" "$mtime" "$preview"
-    done | sort -t'|' -k2,2nr
+    #
+    # Single Python pass over all JSONLs in the dir — used to be a per-file
+    # subprocess for `extract_first_user_msg`. That cost ~24s on a project
+    # with 229 JSONLs because of subprocess startup × N.
+    python3 - "$1" <<'PY'
+import json, os, sys
+pdir = sys.argv[1]
+
+def first_user(path):
+    try:
+        with open(path) as fp:
+            for line in fp:
+                line = line.strip()
+                if not line: continue
+                try: d = json.loads(line)
+                except Exception: continue
+                if d.get('type') in ('user', 'human'):
+                    msg = d.get('message', d.get('content', ''))
+                    if isinstance(msg, dict):
+                        c = msg.get('content', '')
+                    else:
+                        c = msg
+                    if isinstance(c, list):
+                        parts = [x.get('text', '') for x in c if isinstance(x, dict) and x.get('type') == 'text']
+                        c = ' '.join(parts)
+                    if isinstance(c, str) and c.strip():
+                        return ' '.join(c.split())[:100]
+    except Exception:
+        pass
+    return ''
+
+rows = []
+try:
+    entries = os.listdir(pdir)
+except OSError:
+    sys.exit(0)
+for f in entries:
+    if not f.endswith('.jsonl'): continue
+    path = f"{pdir}/{f}"
+    try:
+        mtime = int(os.path.getmtime(path))
+    except OSError:
+        continue
+    uuid = f[:-len('.jsonl')]
+    preview = first_user(path) or '(no user messages)'
+    rows.append((uuid, mtime, preview))
+
+rows.sort(key=lambda r: -r[1])
+for uuid, mtime, preview in rows:
+    print(f'{uuid}|{mtime}|{preview}')
+PY
 }
 
 banner() {
