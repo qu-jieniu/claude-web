@@ -43,19 +43,18 @@ Caddy (system) ── reverse_proxy ──► ttyd (user systemd)   claude-attac
 | Option | Action |
 |---|---|
 | `[running] claude-X (attached/detached, Nm ago)` | Attach to an existing screen (boots any other attached client via `-A -D -RR`). Shown once per live `claude-*` session (including shells), sorted by creation time newest-first. Number-only selection (no letter shortcut — they're dynamic). |
-| `(s) [shell] New plain terminal` | Always creates a fresh `claude-shell-N` (auto-numbered: `claude-shell`, `claude-shell-2`, …) — a plain bash session, no Claude. Auto-tracked: `.env` is written immediately, restores after reboot. |
-| `(n) [new] Start in custom path...` | Prompts for path (Tab-completes via readline; missing paths prompt Y/n to `mkdir -p`) → screen name (default = path basename) → skip-permissions y/N → launches plain `claude`. Auto-tracked. |
-| `(p) [pick] Resume a session...` | Submenu: pick a project → pick a session by UUID + preview text, OR `[id] Type UUID directly` for direct input (≥8-char prefix acceptable). Then screen name + skip-permissions prompt → launches `claude --resume <uuid>`. Auto-tracked. |
-| `(o) [restore] Restore a session that's no longer running...` | Always-visible submenu listing every `.env` whose screen daemon isn't running. After a reboot, every session that was running pre-shutdown is here; pick one to spawn a new screen and `--resume` it. When there's nothing to restore, the submenu shows a "every recorded session is currently running" message — visible reassurance that the feature exists. |
-| `(r) [rename] Rename a running session...` | Shown only when `claude-*` screens exist. Prompts for a new suffix, sanitizes, rejects collisions, then `screen -S <old> -X sessionname claude-<new>`. Renames the `.env` alongside. |
+| `(s) [shell] New plain terminal` | Always creates a fresh `claude-shell-N` (auto-numbered: `claude-shell`, `claude-shell-2`, …) — a plain bash session, no Claude. |
+| `(n) [new] Start in custom path...` | Prompts for path (Tab-completes via readline; missing paths prompt Y/n to `mkdir -p`) → screen name (default = path basename) → skip-permissions y/N → launches plain `claude`. |
+| `(p) [pick] Resume a session...` | Submenu: pick a project → pick a session by UUID + preview text, OR `[id] Type UUID directly` for direct input (≥8-char prefix acceptable). Then screen name + skip-permissions prompt → launches `claude --resume <uuid>`. This is the path for getting any past session back, including after a system shutdown — `~/.claude/projects/` is Claude's global session store, so anything you've ever run is findable here. |
+| `(r) [rename] Rename a running session...` | Shown only when `claude-*` screens exist. Prompts for a new suffix, sanitizes, rejects collisions, then `screen -S <old> -X sessionname claude-<new>`. |
 
-**Selection:** main menu accepts either the number (e.g. `3`) or the bracketed letter (e.g. `p`). Sub-menus (`[pick]`, `[restore]`, `[rename]`) use numbers only since their entries are dynamic.
+**Selection:** main menu accepts either the number (e.g. `3`) or the bracketed letter (e.g. `p`). Sub-menus (`[pick]`, `[rename]`) use numbers only since their entries are dynamic.
+
+**Sessions are ephemeral.** There's no `[save]`, no `.env` registry, no auto-tracking. A session is the running `screen` daemon — when you kill it, it's gone. To resume after a reboot, use `[pick]` to find it in Claude's session history. An earlier auto-track + restore-on-shutdown model was tried and dropped: `[pick]` already covers everything (the .jsonl files survive reboots; just pick the right one), so the duplicate registry wasn't pulling its weight.
+
+**No kill menu item.** Rare enough that it doesn't merit menu real estate. To stop a running session from any shell: `screen -S claude-X -X quit`.
 
 **No delete command:** to remove an old project history, `rm -rf ~/.claude/projects/<encoded>/` directly. Was a rarely-used menu item with an outsized mis-click cost.
-
-**No kill / forget menu items either.** Cleanup is rare enough that it doesn't merit menu real estate. To stop a running session: `screen -S claude-X -X quit` from any shell (the `.env` becomes a restore candidate). To drop a stale restore bookmark you don't want back: `rm ~/claude-web/state/sessions/claude-X.env`.
-
-**Auto-track model.** Every session created through the launcher gets a `.env` immediately (no "Save as bookmark?" prompt — that question is implicit and always "yes"). When you `[kill]` a session, the `.env` is removed alongside the screen — kill means done. If a screen dies *without* an explicit kill (system reboot, crash, OOM, `screen -X quit` from outside the launcher), its `.env` persists and the session appears under `[restore]` next time you open the menu. On every launcher invocation, `sync_existing_state` runs once to backfill `.env`s for any running screens that don't have one yet — so screens spawned outside the launcher (or before this model existed) also get pulled into auto-tracking.
 
 **Exit:** `Ctrl-D` at the `>` prompt exits the launcher (browser closes the connection; CLI returns to parent shell). `Ctrl-C` also works. No `[quit]` entry — redundant.
 
@@ -95,10 +94,10 @@ The launcher reads `~/.claude/projects/` to build the `[pick]` project list. Eac
 Skip permissions (--dangerously-skip-permissions)? [y/N]:
 ```
 
-- `y` → appends `--dangerously-skip-permissions` to the claude command AND records `SKIP_PERMS=1` in the auto-written `.env` so the same flag applies on restore.
-- Any other input → plain launch / `SKIP_PERMS=0`.
+- `y` → appends `--dangerously-skip-permissions` to the claude command.
+- Any other input → plain launch.
 
-There's no "Save as bookmark?" prompt anymore — every session auto-tracks. For `[pick]` / `[new]`, `UUID=` is captured post-detach; for `[shell]`, only KIND/CWD are recorded (shells have no JSONL). Attaching to an already-running screen in `[pick]` skips the prompt (existing session's mode is fixed). The launcher prints a warning first ("screen X already exists — attaching instead of resuming") and waits for Enter, since the existing session keeps its original UUID and flags rather than resuming the one you picked.
+Attaching to an already-running screen in `[pick]` skips the prompt (existing session's mode is fixed). The launcher prints a warning first ("screen X already exists — attaching instead of resuming") and waits for Enter, since the existing session keeps its original UUID and flags rather than resuming the one you picked.
 
 Other flags (`--permission-mode plan|acceptEdits`, `--model sonnet|opus|haiku`) are not prompted — add by hand if needed, or use `/add-dir`, `/model`, etc. as in-session slash commands.
 
@@ -111,14 +110,11 @@ Other flags (`--permission-mode plan|acceptEdits`, `--model sonnet|opus|haiku`) 
 ├── claude-status                # python script feeding the bottom status bar (ctx + 5h cap)
 ├── claude-discord-start         # bootstrap for the Discord router (invoked by claude-discord.service)
 ├── claude-discord-clear         # Discord channel wiper + optional router-context reset
-├── claude-web-restore           # manual bulk re-spawner + --sync (not auto-run at boot)
-├── state/sessions/*.env         # per-session state written by the launcher; consumed by restore (gitignored)
 ├── claude-web.sh                # bash alias (source of truth, symlinked into ~/.bashrc.d)
 ├── ttyd-256color.src            # custom terminfo source — install to /etc/terminfo to fix browser-tab title
 └── systemd/
     ├── claude-web.service           # ttyd launcher service
-    ├── claude-discord.service       # Discord router service
-    └── claude-web-restore.service   # disabled in lazy-resume mode; re-enable to restore at boot
+    └── claude-discord.service       # Discord router service
 
 Suggested install (symlinks let you `git pull` and have updates take effect immediately):
 
@@ -126,7 +122,6 @@ Suggested install (symlinks let you `git pull` and have updates take effect imme
     ~/.bashrc.d/claude-web.sh                          → ~/claude-web/claude-web.sh
     ~/.config/systemd/user/claude-web.service          → ~/claude-web/systemd/claude-web.service
     ~/.config/systemd/user/claude-discord.service      → ~/claude-web/systemd/claude-discord.service
-    ~/.config/systemd/user/claude-web-restore.service  (optional — symlink to enable boot-time restore)
 
 One-time root step (for the browser-tab title to show the session name):
 
@@ -171,47 +166,15 @@ systemctl --user status  claude-web.service
 journalctl --user -u claude-web.service -f
 ```
 
-## Session Persistence (Lazy Resume)
+## Session Persistence
 
-On boot, **nothing is auto-started** except `claude-discord.service` (always-on by design). The launcher shows any recorded session under a `[saved]` entry; pick it to spawn a fresh screen with `claude --resume <UUID>` in ~2s.
+There is none, at the launcher level. Sessions are screens; when a screen dies (kill, crash, reboot), it's gone.
 
-**State file format** (e.g. `state/sessions/claude-ibkr.env`):
-```
-KIND=claude
-CWD=/home/you/projects/myapp
-SKIP_PERMS=1
-UUID=ba2befe2-88a3-4750-9ce2-ba10ed1ad731
-```
-- `KIND`: `claude` or `shell`.
-- `CWD`: absolute path, quoted via `printf %q` so spaces/specials survive.
-- `SKIP_PERMS`: `1` if launched with `--dangerously-skip-permissions`, else `0`.
-- `UUID` *(optional)*: pins the session to a specific JSONL. The launcher auto-populates this after `[new]`/`[pick]` (via `capture_session_uuid` reading the newest JSONL in the project dir) and refreshes it on every resume. Missing UUID = `claude --continue` fallback.
+What survives across reboots is whatever Claude itself writes to disk — namely `~/.claude/projects/<encoded>/<uuid>.jsonl`, one JSONL per session ever started, containing the full conversation. `[pick]` walks that directory, so after a reboot you find your work by going `[pick]` → project → session UUID → resume. The new screen comes up running `claude --resume <uuid>` and you're back in the same conversation.
 
-**Launcher lifecycle hooks** (in `claude-launcher`):
-- `launch_new_screen` → runs the screen; `.env` is written before launch only if `[new]`/`[pick]` caller answered `y` to the save prompt, and `capture_session_uuid` runs post-detach.
-- Shell case in `run_menu` → prompts for save; `y` writes a shell `.env` before the screen starts.
-- `launch_new_screen` / `prompt_custom_path` / `resume_specific_session` / shell branch → write the `.env` unconditionally before launching the screen, then `capture_session_uuid` runs post-detach for claude sessions.
-- `sync_existing_state` → runs once at the top of every `run_menu` invocation. Walks `screen -ls`, writes `.env`s for any live `claude-*` screen that doesn't have one yet. Idempotent. Skips `claude-discord` (systemd-managed bootstrap; auto-restoring via `claude --continue` would skip the Discord plugin setup).
-- `resume_saved_session` → the `[restore]` menu action; spawns the screen with `--resume <UUID>` (or `--continue`), then refreshes UUID.
-- `[kill]` → kills the screen AND removes the `.env`. Kill = "done with this."
-- `[forget]` → removes the `.env` without touching any running screen. Used to drop stale `[restore]` entries you don't want back.
-- `rename_session` → renames the `.env` alongside the screen.
+This is intentionally simpler than what was here before. Earlier designs tried to maintain a `.env` registry under `state/sessions/` so the launcher could list "things you had running" as a separate restore queue — first opt-in (`[save]` was a menu action), then auto-tracked. Both worked but were duplicate state on top of what Claude already keeps in `~/.claude/projects/`. After a reboot, finding the right JSONL via `[pick]` is one extra submenu vs. one less submenu, and you avoid an entire class of "the .env registry disagrees with reality" failure modes. The status bar (`claude-status`) finds the active session via `/proc/<claude-pid>/cwd` + `~/.claude/history.jsonl` instead of needing the registry.
 
-**Auto-track, lazy restore.** Every session created (or detected at menu open) has a `.env`. On clean shutdown / unexpected death / reboot, the `.env` survives — so the `[restore]` list always reflects "things that were running but aren't now." Restoring is per-session, not bulk: each claude process is ~200–300 MB RSS, so resurrecting all at boot would burn memory on sessions you don't open. Discord is the sole always-on exception (managed by its own systemd unit because the bot connection must be live at all times).
-
-**Previous design (replaced):** Sessions used to be ephemeral by default with an explicit `[save]` action and a "Save as bookmark?" prompt on creation. `[kill]` deliberately *kept* the `.env`; `[forget]` was the only way to drop a bookmark. Worked but required remembering to save anything worth keeping — and the user's 12-running-screens / 1-saved-`.env` state was the clear signal that explicit-save was the wrong default for this workflow.
-
-**Previous design (older):** `claude-web-restore.service` (oneshot, `After=claude-web.service`) used to re-spawn every `.env` at boot, with a `systemd-run --user --scope --collect` wrapper to escape the service's cgroup (default `KillMode=control-group` would have reaped every detached screen seconds after the oneshot exited). The service is still disabled; the `claude-web-restore` script still exists for manual bulk-resume from the command line, and can be re-enabled if you ever want boot-time auto-restore.
-
-**Ops:**
-- Drop a restore entry: `rm ~/claude-web/state/sessions/<name>.env` (or `[forget]` from the menu).
-- Manual bulk resume (everything at once): `~/claude-web/claude-web-restore` — idempotent, skips live screens.
-- Dry-run: `ls ~/claude-web/state/sessions/` + `cat` any `.env`.
-
-**Limitations:**
-- SKIP_PERMS is whatever the user answered at session creation. `sync_existing_state` (the auto-backfill) can't reliably read this from `/proc/*/cmdline` — it defaults to `0` for backfilled entries.
-- Multi-session same-cwd collision: with `UUID=` set, each session resumes its own JSONL cleanly. A session without `UUID=` (e.g. one auto-backfilled by `sync_existing_state`) falls back to `--continue`; two `--continue`s sharing a cwd will race on the most-recent-JSONL rule.
-- Shells restore only name + cwd. In-memory history and running processes are gone — that's how shells work.
+Discord is the only always-on exception: `claude-discord.service` (systemd) keeps the router up across reboots because the Discord bot connection has to be live at all times (one connection per token; can't have it down).
 
 ## Discord Router Session
 
@@ -295,11 +258,8 @@ To tighten: add `basic_auth` (or any other auth directive) in the Caddy block.
 - **Host-native, not containerized.** Claude needs `~/.claude/`, your project directories, git creds, SSH, `PATH`, MCP configs, etc. Bind-mounting all of that into a container is no gain over just running on the host.
 - **One screen per project, not one screen with windows.** Independent session lifetimes — one crash/kill doesn't nuke others; surgical `[kill]` works; `screen -ls` is authoritative. Costs: switching between projects requires detach → pick in launcher → reattach (two keystrokes, acceptable for 2–5 concurrent sessions).
 - **screen, not tmux.** Familiarity with keybindings. tmux would be objectively cleaner (better scripting API, `new-session -A`, saner resize, mouse scroll-back) but not worth the retraining cost for this workflow.
-- **Lazy resume, not boot-time auto-restore.** On boot, nothing is auto-started (except the Discord router). Each saved session is re-spawned on demand when you pick it in `[saved]` — ~2s cost. Avoids paying ~200–300 MB per idle `claude` process for sessions you don't actually open. Also sidesteps a cgroup-escape workaround the old oneshot-service design needed.
-- **Auto-track on create, kill = forget.** Every session created through the launcher writes its `.env` immediately, and `[kill]` removes it. The `[restore]` list reflects "things that were running but aren't now" — so a power outage, OOM, or `screen -X quit` from outside the launcher always leaves a restore candidate, but explicit `[kill]` doesn't. Tradeoff: more `.env` churn than the previous explicit-save model, but matches the real user behavior of "I want my work back after a reboot" without needing to remember to save anything. Sessions left running across a reboot all show under `[restore]` for one-by-one revival.
-- **`[kill]` does not remove bookmarks; `[forget]` does.** Semantic split: kill = terminate the running instance, forget = drop the bookmark. Covers the case where you want to close a session for now but come back tomorrow.
-- **`UUID=` pin in `.env`, refreshed on every resume.** Records the exact session UUID to avoid the `--continue` "most-recent-JSONL-in-cwd wins" race when multiple sessions share a project dir. Refresh on resume protects against `--resume` forking from a stale JSONL — the `.env`'s UUID always reflects the latest session state.
-- **Plain bash `read`-based menu for the main screen, `select` for sub-menus.** The main menu switched away from `select` to support letter shortcuts (`s`, `n`, `p`, `v`, `r`, `k`, `f`) alongside numbers. Sub-menus keep `select` because their entries are dynamic and don't benefit from letters.
+- **No separate session registry — `[pick]` is the only resume path.** Earlier iterations maintained a `state/sessions/*.env` registry: opt-in `[save]` first, then auto-track-on-create. The auto-track version solved "I forgot to save before the reboot" but introduced duplicate state on top of `~/.claude/projects/`, plus a separate `[restore]` menu doing exactly what `[pick]` already does (walk the project dir, pick a JSONL, spawn screen, `--resume`). Both registries got dropped — the launcher is now stateless. Tradeoff: after a reboot you can't see "the 12 things I had running" as a single labeled list; you re-find them through `[pick]` like any other past session. Acceptable because the JSONLs themselves don't move and the user's mental "what was I working on" maps cleanly to project paths.
+- **Plain bash `read`-based menu for the main screen, `select` for sub-menus.** The main menu uses `read` to support letter shortcuts (`s`, `n`, `p`, `r`) alongside numbers. Sub-menus keep `select` because their entries are dynamic and don't benefit from letters.
 - **JSONL `cwd` extraction, not filename decoding.** The encoded directory name (`/`, `.` → `-`) is lossy. Reading `cwd` from the JSONL content is reliable and matches what Claude uses internally.
 - **`claude-` prefix enforced.** Keeps the launcher's `[running]` list clean — unrelated screens (e.g., `hdd1` for backups) don't clutter the view.
 - **Custom TERM (`ttyd-256color`) instead of suppressing OSC inside screen.** Browser-tab title needed to lock to the session name and not drift to the chat topic on every Claude turn. Approach considered first — `dynamictitle off`, `hardstatus string "%S"`, `termcapinfo … hs@:ts@:fs@:ds@` — all failed because the actual forwarder is screen's compile-time `RXVT_OSC` code path (`SetXtermOSC` in `display.c`), gated only by `D_CXT`, which is set whenever the outer TERM contains "xterm"/"rxvt" or `kmous` is `\E[M`/`\E[<`. There's no runtime knob. The clean fix is to advertise a TERM that fails both tests, hence the custom terminfo: a copy of `xterm-256color` with the name changed and `kmous` stripped. Has to live under `/etc/terminfo` because `/usr/bin/screen` is setgid and glibc strips `TERMINFO`/`TERMINFO_DIRS` from its environment.
@@ -320,7 +280,7 @@ claude-foo | ctx 48k/950k (5%) │ 5h 23% (⏱ 1h42m)
 
 **Per-session screenrc.** New sessions launched through the launcher get this config via a generated `/tmp/claude-web-rc/<sname>.rc` (sources `/etc/screenrc`, then sets `backtick 0 …` and `caption always`) passed to screen as `-c`. Pre-existing screens (or any that escape this path, like `claude-discord` from its own bootstrap) get the same config retrofitted via `screen -X` calls in `setup_status_bar`, which the launcher invokes on every attach — idempotent, so it's safe to call repeatedly.
 
-**Caveats.** `caption always` reserves a row at the bottom, so Claude's own TUI redraws above it; expect a one-row gap between Claude's status footer and the bar. The `ctx` segment shows `ctx -` for sessions without an `.env` (no recorded UUID/CWD, e.g. unsaved shells) and `ctx ?` if the JSONL is found but contains no assistant turns yet.
+**Caveats.** `caption always` reserves a row at the bottom, so Claude's own TUI redraws above it; expect a one-row gap between Claude's status footer and the bar. The `ctx` segment shows `ctx -` for sessions where no JSONL can be resolved (e.g. plain `[shell]` sessions, or when the claude process can't be located in `/proc`) and `ctx ?` if the JSONL is found but contains no assistant turns yet.
 
 ## Known Issues / Limitations
 

@@ -5,8 +5,6 @@
 set -uo pipefail
 
 PROJECTS_DIR="$HOME/.claude/projects"
-STATE_DIR="$HOME/claude-web/state/sessions"
-mkdir -p "$STATE_DIR"
 
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_-' '_' | tr -s '_'; }
 
@@ -48,89 +46,8 @@ setup_status_bar() {
     screen -S "$sname" -X caption always '%S | %`' 2>/dev/null || true
 }
 
-# Per-session state for restore-on-boot. One file per screen, named
-# $STATE_DIR/<screen-name>.env, sourced by claude-web-restore. We persist cwd,
-# kind (claude/shell), and whether --dangerously-skip-permissions was used.
-# The original --resume UUID is NOT persisted — restore uses `claude --continue`
-# to pick up the latest JSONL in the project, matching the session's current
-# state rather than the older launch point.
-write_state() {
-    # $1 = full screen name (claude-*)  $2 = kind (claude|shell)  $3 = cwd  $4 = args (optional)
-    local sname="$1" kind="$2" cwd="$3" args="${4:-}"
-    local skip=0
-    [[ "$args" == *--dangerously-skip-permissions* ]] && skip=1
-    {
-        printf 'KIND=%s\n' "$kind"
-        printf 'CWD=%q\n' "$cwd"
-        printf 'SKIP_PERMS=%d\n' "$skip"
-    } > "$STATE_DIR/$sname.env"
-}
-
 # Given a cwd, return the encoded ~/.claude/projects/ dir name: / and . → -
 project_dir_for() { printf '%s/%s' "$PROJECTS_DIR" "$(printf '%s' "$1" | sed 's|[/.]|-|g')"; }
-
-# After a claude session is launched/resumed in `cwd`, find the newest JSONL in
-# its project dir and write UUID= into the session's .env. Lets subsequent boots
-# / lazy-resumes pin to the exact session rather than whatever --continue picks.
-capture_session_uuid() {
-    local sname="$1" cwd="$2"
-    local pdir; pdir=$(project_dir_for "$cwd")
-    [ -d "$pdir" ] || return 0
-    local newest uuid
-    newest=$(ls -t "$pdir"/*.jsonl 2>/dev/null | head -1)
-    [ -n "$newest" ] || return 0
-    uuid=$(basename "$newest" .jsonl)
-    local env="$STATE_DIR/$sname.env"
-    [ -f "$env" ] || return 0
-    if grep -q '^UUID=' "$env"; then
-        sed -i "s|^UUID=.*|UUID=$uuid|" "$env"
-    else
-        printf 'UUID=%s\n' "$uuid" >> "$env"
-    fi
-}
-
-remove_state() { rm -f "$STATE_DIR/$1.env"; }
-
-rename_state() {
-    # $1 = old full name  $2 = new full name
-    [ -f "$STATE_DIR/$1.env" ] && mv "$STATE_DIR/$1.env" "$STATE_DIR/$2.env"
-}
-
-# Walk running `claude-*` screens and write a state file for any that don't
-# have one yet. The cwd is recovered from /proc/<child-bash-pid>/cwd; kind is
-# inferred by checking whether any descendant process matches `claude` by name.
-# Excludes `claude-discord` because that session is systemd-managed with a
-# bespoke bootstrap (token export) — auto-restoring via `claude --continue`
-# would skip the Discord plugin setup and fail.
-sync_existing_state() {
-    local line pid name bash_pid cwd kind has_claude
-    while IFS= read -r line; do
-        [[ "$line" =~ ([0-9]+)\.claude-([^[:space:]]+) ]] || continue
-        pid="${BASH_REMATCH[1]}"
-        name="claude-${BASH_REMATCH[2]}"
-        [ "$name" = "claude-discord" ] && continue
-        [ -f "$STATE_DIR/$name.env" ] && continue
-
-        bash_pid=$(pgrep -P "$pid" -n 2>/dev/null | head -1)
-        [ -z "$bash_pid" ] && continue
-        cwd=$(readlink "/proc/$bash_pid/cwd" 2>/dev/null)
-        [ -z "$cwd" ] || [ ! -d "$cwd" ] && cwd="$HOME"
-
-        if pgrep -f -P "$bash_pid" claude 2>/dev/null | grep -qv "^$bash_pid$" \
-           || pgrep --ns "$bash_pid" -x claude 2>/dev/null | head -1 >/dev/null; then
-            kind=claude
-        else
-            # Fallback: any descendant named 'claude'
-            if pstree -p "$pid" 2>/dev/null | grep -q 'claude('; then
-                kind=claude
-            else
-                kind=shell
-            fi
-        fi
-
-        write_state "$name" "$kind" "$cwd" ""
-    done < <(screen -ls 2>/dev/null)
-}
 
 short_name_for() {
     local path="$1" base
@@ -405,95 +322,6 @@ launch_new_screen() {
     screen -c "$rc" -S "$sname" bash -lc "cd \"$cwd\" && claude ${args}; exec \"\$SHELL\""
 }
 
-# Resume a saved session (one with a .env but no live screen).
-# Uses --resume <UUID> if UUID is recorded, else --continue.
-resume_saved_session() {
-    local sname="$1"
-    local env="$STATE_DIR/$sname.env"
-    if [ ! -f "$env" ]; then echo "no state for $sname"; sleep 1; return 1; fi
-    local KIND="" CWD="" SKIP_PERMS=0 UUID=""
-    # shellcheck disable=SC1090
-    source "$env"
-    if [ -z "$CWD" ] || [ ! -d "$CWD" ]; then
-        echo "cwd missing: ${CWD:-unset} — remove $env to forget this session"
-        sleep 2; return 1
-    fi
-    local flags=""
-    [ "${SKIP_PERMS:-0}" = "1" ] && flags=" --dangerously-skip-permissions"
-    set_title "$sname"
-    local rc; rc=$(generate_session_rc "$sname")
-    case "$KIND" in
-        shell)
-            screen -c "$rc" -S "$sname" bash -l
-            ;;
-        claude)
-            local resume_cmd
-            if [ -n "$UUID" ]; then
-                resume_cmd="claude --resume \"$UUID\"${flags}"
-            else
-                resume_cmd="claude --continue${flags}"
-            fi
-            screen -c "$rc" -S "$sname" bash -lc "cd \"$CWD\" && $resume_cmd; exec \"\$SHELL\""
-            capture_session_uuid "$sname" "$CWD"
-            ;;
-        *)
-            echo "unknown KIND=${KIND:-unset} in $env"; sleep 1; return 1
-            ;;
-    esac
-}
-
-# Output: name|last_active_epoch for .env files without a running screen.
-# last_active: newest JSONL mtime in the session's project dir, else .env mtime.
-list_saved_sessions() {
-    local env sname KIND CWD pdir newest mtime
-    shopt -s nullglob
-    for env in "$STATE_DIR"/*.env; do
-        sname=$(basename "$env" .env)
-        if screen_exists "$sname"; then continue; fi
-        KIND=""; CWD=""
-        # shellcheck disable=SC1090
-        source "$env"
-        mtime=$(stat -c %Y "$env" 2>/dev/null || echo 0)
-        if [ "$KIND" = "claude" ] && [ -n "$CWD" ] && [ -d "$CWD" ]; then
-            pdir=$(project_dir_for "$CWD")
-            newest=$(ls -t "$pdir"/*.jsonl 2>/dev/null | head -1)
-            if [ -n "$newest" ]; then
-                mtime=$(stat -c %Y "$newest" 2>/dev/null || echo "$mtime")
-            fi
-        fi
-        printf '%s|%s\n' "$sname" "$mtime"
-    done | sort -t'|' -k2,2nr
-}
-
-pick_saved_menu() {
-    banner
-    echo "Sessions you can restore (.env exists, screen daemon isn't running):"
-    echo
-    local -a names=()
-    local n age
-    while IFS='|' read -r n age; do
-        [ -z "$n" ] && continue
-        local age_label=""
-        [ "$age" -gt 0 ] && age_label="  (last active $(time_ago "$age"))"
-        names+=("$n$age_label")
-    done < <(list_saved_sessions)
-    if [ "${#names[@]}" -eq 0 ]; then
-        echo "(nothing to restore — every recorded session is currently running)"
-        sleep 2; return
-    fi
-    names+=("cancel")
-    PS3=$'\nrestore which? '
-    local pick raw_name
-    select pick in "${names[@]}"; do
-        [ -z "${pick:-}" ] && continue
-        [ "$pick" = "cancel" ] && break
-        # Strip the trailing " (last active ...)" if present
-        raw_name="${pick%% *}"
-        resume_saved_session "$raw_name"
-        break
-    done
-}
-
 rename_session() {
     local old="$1" input new_suffix new_name
     read -erp "New name for claude-$old [claude-$old]: " input
@@ -510,7 +338,6 @@ rename_session() {
         echo "A screen named $new_name already exists. Pick another name."; sleep 2; return 1
     fi
     if screen -S "claude-$old" -X sessionname "$new_name"; then
-        rename_state "claude-$old" "$new_name"
         echo "Renamed claude-$old -> $new_name."
     else
         echo "Rename failed."
@@ -535,9 +362,7 @@ resume_specific_session() {
         screen -A -D -RR -S "$sname"
     else
         local flags; flags=$(prompt_skip_perms)
-        write_state "$sname" claude "$cwd" "$flags"
         launch_new_screen "$sname" "$cwd" "--resume $uuid${flags}"
-        capture_session_uuid "$sname" "$cwd"
     fi
 }
 
@@ -671,9 +496,7 @@ prompt_custom_path() {
         echo "A screen named $sname already exists. Pick another name."; sleep 2; return 1
     fi
     local flags; flags=$(prompt_skip_perms)
-    write_state "$sname" claude "$p" "$flags"
     launch_new_screen "$sname" "$p" "$flags"
-    capture_session_uuid "$sname" "$p"
 }
 
 pick_running_menu() {
@@ -705,13 +528,6 @@ pick_running_menu() {
 
 run_menu() {
     banner
-    # Auto-track: every running screen should have a .env. This catches
-    # screens spawned outside the launcher (e.g. via the old explicit-save
-    # workflow, or a manual `screen -S ...`) and brings them under the
-    # restore-on-shutdown model. Cheap to run — it's a one-pass scan over
-    # screen -ls, skipping already-recorded entries.
-    sync_existing_state
-
     local -a labels=() actions=()
     local -A letter_map=()  # letter -> action index
     local -A running_map=()
@@ -750,12 +566,6 @@ run_menu() {
         actions+=("attach:$n")
     done
 
-    # Count restore candidates (.env exists but screen daemon is not running)
-    # so we can conditionally show the [forget] button. The candidates
-    # themselves are NOT listed inline — they live in the [restore] submenu.
-    local saved_count
-    saved_count=$(list_saved_sessions | grep -c .)
-
     labels+=("(s) [shell]   New plain terminal (claude-shell-N)")
     actions+=("shell"); letter_map[s]=$(( ${#actions[@]} - 1 ))
 
@@ -765,23 +575,15 @@ run_menu() {
     labels+=("(p) [pick]    Resume a session...")
     actions+=("pick_session"); letter_map[p]=$(( ${#actions[@]} - 1 ))
 
-    # [restore] button always visible — gives "where do I bring back a session
-    # after reboot?" a discoverable home even when no candidates currently
-    # exist. The submenu itself shows an "(nothing to restore — every recorded
-    # session is currently running)" message in that case.
-    labels+=("(o) [restore] Restore a session that's no longer running...")
-    actions+=("restore_menu"); letter_map[o]=$(( ${#actions[@]} - 1 ))
-
     if [ "${#running_map[@]}" -gt 0 ]; then
         labels+=("(r) [rename]  Rename a running session...")
         actions+=("rename_menu"); letter_map[r]=$(( ${#actions[@]} - 1 ))
     fi
 
-    # No menu actions for kill / forget — explicit cleanup is rare enough
-    # that the shell-only path is fine. To kill a session:
+    # No menu actions for kill — explicit cleanup is rare enough that the
+    # shell-only path is fine. To kill a session:
     #   screen -S claude-X -X quit
-    # To drop a stale restore bookmark:
-    #   rm ~/claude-web/state/sessions/claude-X.env
+    # Sessions are ephemeral; nothing to "forget."
 
     local i
     for ((i=0; i<${#labels[@]}; i++)); do
@@ -812,16 +614,13 @@ run_menu() {
         action="${actions[$idx]}"
         case "$action" in
             attach:*)       attach_session "${action#attach:}"; return ;;
-            resume_saved:*) resume_saved_session "${action#resume_saved:}"; return ;;
             custom)         prompt_custom_path; return ;;
             shell)          local sname="claude-$(next_shell_name)"
-                            write_state "$sname" shell "$HOME" ""
                             set_title "$sname"
                             local rc; rc=$(generate_session_rc "$sname")
                             screen -c "$rc" -S "$sname"; return ;;
             pick_session)   pick_session_menu; return ;;
             rename_menu)    pick_running_menu rename rename_session; return ;;
-            restore_menu)   pick_saved_menu; return ;;
         esac
     done
 }
