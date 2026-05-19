@@ -66,7 +66,11 @@ Caddy (system) ── reverse_proxy ──► ttyd (user systemd)   claude-attac
 - Special: `$HOME` → default suffix `home`
 - If the basename already starts with `claude-` (e.g. `~/claude-web`), the prefix is stripped to avoid double-prefix — `claude-web` becomes `web` → screen `claude-web`.
 
-**Screen keybindings cheat-sheet** is printed at the top of every menu redraw: `Ctrl-A d` (detach), `Ctrl-A a d` (detach an inner nested screen — the `a` forwards a literal `Ctrl-A` past the outer screen), and `Ctrl-A [` (copy/scroll mode: PgUp/PgDn to navigate, `/` and `?` to search, `q` to exit). `Ctrl-A [` is the reliable way to scroll back through terminal output in the browser — mouse wheel inside a TUI is forwarded to the app as arrow keys by xterm.js, not used for scrolling.
+**Screen keybindings cheat-sheet** is printed at the top of every menu redraw: `Ctrl-A d` (detach), `Ctrl-A a d` (detach an inner nested screen — the `a` forwards a literal `Ctrl-A` past the outer screen), `Ctrl-A [` (copy/scroll mode: PgUp/PgDn to navigate, `/` and `?` to search, `q` to exit), and `Ctrl-A j` (live JSONL view — opens a new screen window running `less +F` on the current session's JSONL).
+
+**`Ctrl-A [` vs. `Ctrl-A j`.** Both scroll back, but at different levels. `Ctrl-A [` shows screen's main-buffer scrollback — i.e., snapshots of the TUI as it was rendered. Claude Code's "agents" landing UI is sparse, so its frames dominate the scrollback with whitespace; scrolling back often shows long blank stretches with isolated content. `Ctrl-A j` bypasses that entirely by reading Claude's authoritative session log (`~/.claude/projects/<encoded>/<uuid>.jsonl`) in `less +F` follow mode, so new turns appear live as Claude writes them. Use `j` for "what did we actually discuss"; use `[` for "what was on screen X minutes ago". The JSONL view is bound per-session via the per-session screenrc (the binding gets retrofitted on every attach by `apply_session_config`), and the helper resolves the JSONL via `claude-status --jsonl $STY-suffix`.
+
+The JSONL viewer pipes through `claude-jsonl-pretty`, a small Python streamer that formats each event as a readable transcript block: `YOU` / `CLAUDE` headers with timestamps, tool calls collapsed to one-liners (`→ Bash(description)`), tool results indented and truncated past 400 chars, thinking blocks snipped to 200 chars. Raw JSON is one keystroke away if needed — inside the JSONL window, `Ctrl-A :` then `exec less +F /path/to.jsonl` opens the unfiltered file.
 
 **Sub-menus re-banner:** `[pick]`, `[kill]`, `[rename]`, and `[forget]` call `banner` at entry so scrollback stays clean across long sessions.
 
@@ -85,6 +89,14 @@ claude-attach() { "$HOME/.local/bin/claude-launcher"; }
 The launcher reads `~/.claude/projects/` to build the `[pick]` project list. Each project dir is encoded as `/` and `.` → `-` (lossy). To recover the real `cwd`, the launcher scans each `*.jsonl` file for the `cwd` field (Claude writes it into the JSONL at session start). Projects whose `cwd` no longer exists are filtered out of `[pick]` entirely — no stale entries. To remove an old project history manually: `rm -rf ~/.claude/projects/<encoded>/`.
 
 **Moving a project directory** requires updating three things manually: the physical dir, the encoded `~/.claude/projects/<encoded>/` name, and the `cwd` field inside each session's JSONL. There's no launcher automation for this — rare operation. See shell snippet in session history.
+
+## Remote Control
+
+Every claude session launched by the launcher comes up with Claude Code's `--remote-control <name>` flag pre-applied, so the session appears in claude.ai under your account for drive-by control from any browser logged into the same account. Name passed is the screen suffix (`trader` for `claude-trader`); claude.ai surfaces it as `<hostname>-<name>` via the default name prefix.
+
+Opt-out: set `CLAUDE_WEB_NO_REMOTE=1` in the environment of the launcher (e.g., before `claude-attach` or in the ttyd service if you want to disable it globally) and new sessions skip the flag. Already-running sessions are unaffected — Remote Control is set at session start.
+
+Shells (`claude-shell-N`) and the Discord router (`claude-discord`, which uses its own bootstrap script `claude-discord-start`) are not touched by this auto-injection. Add `--remote-control` to `claude-discord-start` by hand if you want the router to be reachable from claude.ai too.
 
 ## Flag Prompt
 
@@ -108,6 +120,8 @@ Other flags (`--permission-mode plan|acceptEdits`, `--model sonnet|opus|haiku`) 
 ├── CLAUDE.md                    # this file
 ├── claude-launcher              # main bash launcher (source of truth, symlinked into ~/.local/bin)
 ├── claude-status                # python script feeding the bottom status bar (ctx + 5h cap)
+├── claude-jsonl-view            # bash wrapper invoked by Ctrl-A j (resolves JSONL, exec less)
+├── claude-jsonl-pretty          # python streamer that formats JSONL into a readable transcript
 ├── claude-discord-start         # bootstrap for the Discord router (invoked by claude-discord.service)
 ├── claude-discord-clear         # Discord channel wiper + optional router-context reset
 ├── claude-web.sh                # bash alias (source of truth, symlinked into ~/.bashrc.d)

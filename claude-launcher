@@ -19,11 +19,12 @@ sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_-' '_' | tr -s '_'; }
 # screen-4.9.1/display.c SetXtermOSC for the forwarding code path.
 set_title() { printf '\033]0;%s\007' "$1"; }
 
-# Per-session screenrc generator for the bottom status bar. Bakes the
-# session name into the backtick command so the claude-status script
-# knows which session to inspect (backticks run in screen's main process
-# context, not the session's, so STY-based detection wouldn't work).
+# Per-session screenrc generator: bakes the status-bar backtick (one per
+# session because backticks run in screen's main process context, so the
+# session name has to be hard-coded) plus the Ctrl-A j keybinding that
+# opens the live JSONL view in a new window.
 STATUS_SCRIPT="$HOME/claude-web/claude-status"
+JSONL_VIEW_SCRIPT="$HOME/claude-web/claude-jsonl-view"
 RC_DIR="/tmp/claude-web-rc"
 generate_session_rc() {
     local sname="$1" rc
@@ -33,17 +34,22 @@ generate_session_rc() {
         printf 'source /etc/screenrc\n'
         printf 'backtick 0 30 30 %q %q\n' "$STATUS_SCRIPT" "$sname"
         printf 'caption always "%%S | %%\x60"\n'
+        # Ctrl-A j → new window titled jsonl, running the JSONL viewer.
+        # less is built into less; the helper just resolves the path.
+        printf 'bind j screen -t jsonl %q\n' "$JSONL_VIEW_SCRIPT"
     } > "$rc"
     printf '%s' "$rc"
 }
 
 # Idempotent retrofit for screens created before the launcher knew about
-# the status bar (or for sessions like claude-discord that come from a
-# different bootstrap). Safe to call on every attach.
-setup_status_bar() {
+# the status bar / JSONL binding (or for sessions like claude-discord that
+# come from a different bootstrap). Re-sources the per-session rc, so any
+# new directive added to generate_session_rc gets picked up automatically
+# on the next attach.
+apply_session_config() {
     local sname="$1"
-    screen -S "$sname" -X backtick 0 30 30 "$STATUS_SCRIPT" "$sname" 2>/dev/null || true
-    screen -S "$sname" -X caption always '%S | %`' 2>/dev/null || true
+    local rc; rc=$(generate_session_rc "$sname")
+    screen -S "$sname" -X source "$rc" 2>/dev/null || true
 }
 
 # Given a cwd, return the encoded ~/.claude/projects/ dir name: / and . → -
@@ -293,12 +299,13 @@ banner() {
     printf '  %s\n\n' "$(date '+%F %H:%M')"
     printf '  screen:  Ctrl-A d   = detach (back to this menu)\n'
     printf '           Ctrl-A a d = detach an inner nested screen\n'
-    printf '           Ctrl-A [   = scroll mode (PgUp/PgDn, / and ? search, q exit)\n\n'
+    printf '           Ctrl-A [   = scroll mode (PgUp/PgDn, / and ? search, q exit)\n'
+    printf '           Ctrl-A j   = live JSONL view of this session (q to close)\n\n'
 }
 
 attach_session() {
     set_title "claude-$1"
-    setup_status_bar "claude-$1"
+    apply_session_config "claude-$1"
     screen -A -D -RR -S "claude-$1"
 }
 
@@ -315,11 +322,21 @@ next_shell_name() {
 
 launch_new_screen() {
     # $1 = full screen name (claude-<suffix>)  $2 = cwd  $3 = claude args (may be empty)
-    # Ephemeral — no .env is written. Use [save] in the menu to bookmark.
+    # Ephemeral — no .env is written.
     local sname="$1" cwd="$2" args="$3"
     set_title "$sname"
     local rc; rc=$(generate_session_rc "$sname")
-    screen -c "$rc" -S "$sname" bash -lc "cd \"$cwd\" && claude ${args}; exec \"\$SHELL\""
+    # Auto-enable Claude Code's Remote Control (--remote-control <name>) so
+    # this session shows up in claude.ai for cross-device drive-by control.
+    # Name passed is the screen suffix (e.g. "trader" from "claude-trader");
+    # claude.ai surfaces it as "<hostname>-<name>" via the default prefix.
+    # Skip if the caller already passed --remote-control, or if the env var
+    # CLAUDE_WEB_NO_REMOTE is set (privacy-sensitive work, etc.).
+    local rc_arg=""
+    if [ -z "${CLAUDE_WEB_NO_REMOTE:-}" ] && [[ "$args" != *"--remote-control"* ]]; then
+        rc_arg=" --remote-control ${sname#claude-}"
+    fi
+    screen -c "$rc" -S "$sname" bash -lc "cd \"$cwd\" && claude${rc_arg} ${args}; exec \"\$SHELL\""
 }
 
 rename_session() {
@@ -358,7 +375,7 @@ resume_specific_session() {
         echo "The existing session keeps its original UUID and flags; nothing is resumed."
         read -erp "Press Enter to attach anyway, or Ctrl-C to cancel: " _
         set_title "$sname"
-        setup_status_bar "$sname"
+        apply_session_config "$sname"
         screen -A -D -RR -S "$sname"
     else
         local flags; flags=$(prompt_skip_perms)

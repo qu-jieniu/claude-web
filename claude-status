@@ -423,7 +423,17 @@ def fmt_cap() -> str | None:
 
 
 def main() -> int:
-    name = sys.argv[1] if len(sys.argv) > 1 else None
+    args = sys.argv[1:]
+    if args and args[0] == "--jsonl":
+        name = args[1] if len(args) > 1 else None
+        if not name:
+            return 1
+        path = session_jsonl(name, read_env(name))
+        if not path:
+            return 1
+        sys.stdout.write(path)
+        return 0
+    name = args[0] if args else None
     parts = [p for p in (fmt_ctx(name), fmt_cap()) if p]
     sys.stdout.write(" │ ".join(parts) if parts else "—")
     return 0
