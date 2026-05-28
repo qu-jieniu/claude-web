@@ -22,14 +22,34 @@
   f.src = '/t/' + (arg ? '?arg=' + encodeURIComponent(arg) : '');
   f.addEventListener('load', function () { try { f.contentWindow.focus(); } catch (e) {} });
 
+  // Reflect the active session into two places (replaceState, never a reload):
+  //   1. the top window's URL — drives tab-reopen / browser-restore via ?arg=.
+  //   2. the iframe's own URL — drives WS-*reconnect* reattach. ttyd rebuilds
+  //      its /ws URL from window.location.search (the iframe's) on every
+  //      connect, so after e.g. a Caddy reload drops the socket, the arg must
+  //      already live on the iframe URL or the new launcher comes up arg-less
+  //      and shows the menu. Menu-navigated sessions never put the arg on the
+  //      iframe otherwise (only the address bar gets it), which is the
+  //      intermittent "Caddy deploy kicks me back to the launcher" bug.
+  function setArg(val) {
+    var u = new URL(location.href);
+    if (val === null) u.searchParams.delete('arg'); else u.searchParams.set('arg', val);
+    if (u.href !== location.href) history.replaceState(null, '', u.href);
+    try {
+      var iw = f.contentWindow;
+      var iu = new URL(iw.location.href);
+      if (val === null) iu.searchParams.delete('arg'); else iu.searchParams.set('arg', val);
+      if (iu.href !== iw.location.href) iw.history.replaceState(null, '', iu.href);
+    } catch (e) {}
+  }
+
   // The launcher sets the terminal title via OSC: "claude-<session>" inside a
   // session, "claude-launcher" at the menu. ttyd reflects that into the iframe's
   // document.title but appends its own base title, so the value is actually
   // "claude-<session> | <base>". We parse only the leading claude-<suffix> token
-  // (suffix is sanitized to [A-Za-z0-9_-], so it stops cleanly before " | ") and
-  // mirror it into our address bar, so reopening the tab restores the session via
-  // ?arg=. Titles that don't start with claude- (ttyd's default / transient init)
-  // are left alone so they can't wipe a valid arg before attach completes.
+  // (suffix is sanitized to [A-Za-z0-9_-], so it stops cleanly before " | ").
+  // Titles that don't start with claude- (ttyd's default / transient init) are
+  // left alone so they can't wipe a valid arg before attach completes.
   var last = null;
   setInterval(function () {
     var t;
@@ -39,15 +59,8 @@
     var m = /^claude-([A-Za-z0-9_-]+)/.exec(t);
     if (!m) return;
     var s = m[1];
-    var u = new URL(location.href);
-    var cur = u.searchParams.get('arg');
-    if (s === 'launcher') {
-      if (cur !== null) { u.searchParams.delete('arg'); history.replaceState(null, '', u.href); }
-      document.title = 'Claude';
-    } else {
-      if (cur !== s) { u.searchParams.set('arg', s); history.replaceState(null, '', u.href); }
-      document.title = 'claude-' + s;
-    }
+    if (s === 'launcher') { setArg(null); document.title = 'Claude'; }
+    else { setArg(s); document.title = 'claude-' + s; }
   }, 700);
 })();
 </script>
