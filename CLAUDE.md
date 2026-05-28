@@ -13,7 +13,8 @@ Browser (claude.example.com)                 CLI (terminal)
         │                                           │
         │ HTTPS                                     │ bash
         ▼                                           ▼
-Caddy (system) ── reverse_proxy ──► ttyd (user systemd)   claude-attach function
+Caddy (system) ─ /t/* reverse_proxy ─► ttyd (user systemd)   claude-attach function
+   (/ serves web/index.html wrapper → iframes /t/ and syncs URL ?arg=<session>)
                                          │                        │
                                          │ spawns per-connection  │
                                          ▼                        ▼
@@ -68,9 +69,9 @@ Caddy (system) ── reverse_proxy ──► ttyd (user systemd)   claude-attac
 
 **Screen keybindings cheat-sheet** is printed at the top of every menu redraw: `Ctrl-A d` (detach), `Ctrl-A a d` (detach an inner nested screen — the `a` forwards a literal `Ctrl-A` past the outer screen), `Ctrl-A [` (copy/scroll mode: PgUp/PgDn to navigate, `/` and `?` to search, `q` to exit), and `Ctrl-A j` (live JSONL view — opens a new screen window running `less +F` on the current session's JSONL).
 
-**`Ctrl-A [` vs. `Ctrl-A j`.** Both scroll back, but at different levels. `Ctrl-A [` shows screen's main-buffer scrollback — i.e., snapshots of the TUI as it was rendered. Claude Code's "agents" landing UI is sparse, so its frames dominate the scrollback with whitespace; scrolling back often shows long blank stretches with isolated content. `Ctrl-A j` bypasses that entirely by reading Claude's authoritative session log (`~/.claude/projects/<encoded>/<uuid>.jsonl`) in `less +F` follow mode, so new turns appear live as Claude writes them. Use `j` for "what did we actually discuss"; use `[` for "what was on screen X minutes ago". The JSONL view is bound per-session via the per-session screenrc (the binding gets retrofitted on every attach by `apply_session_config`), and the helper resolves the JSONL via `claude-status --jsonl $STY-suffix`.
+**`Ctrl-A [` vs. `Ctrl-A j`.** Both scroll back, but at different levels. `Ctrl-A [` shows screen's main-buffer scrollback — i.e., snapshots of the TUI as it was rendered. Claude Code's "agents" landing UI is sparse, so its frames dominate the scrollback with whitespace; scrolling back often shows long blank stretches with isolated content. `Ctrl-A j` bypasses that entirely by reading Claude's authoritative session log (`~/.claude/projects/<encoded>/<uuid>.jsonl`) in plain `less`, so the conversation is always there in dense text form. Use `j` for "what did we actually discuss"; use `[` for "what was on screen X minutes ago". The JSONL view is bound per-session via the per-session screenrc (the binding gets retrofitted on every attach by `apply_session_config`), and the helper resolves the JSONL via `claude-status --jsonl $STY-suffix`. The viewer is a snapshot — to see new turns added after opening, close (`q`) and re-press `Ctrl-A j`. An earlier version defaulted to `less +F` (follow mode) but the "Waiting for data" prompt that less shows during idle read as broken; non-follow is the safer default since Claude rarely streams JSONL events at a rate where a live tail is more useful than a re-open.
 
-The JSONL viewer pipes through `claude-jsonl-pretty`, a small Python streamer that formats each event as a readable transcript block: `YOU` / `CLAUDE` headers with timestamps, tool calls collapsed to one-liners (`→ Bash(description)`), tool results indented and truncated past 400 chars, thinking blocks snipped to 200 chars. Raw JSON is one keystroke away if needed — inside the JSONL window, `Ctrl-A :` then `exec less +F /path/to.jsonl` opens the unfiltered file.
+The JSONL viewer pipes through `claude-jsonl-pretty`, a small Python formatter that emits each event as a readable transcript block: `YOU` / `CLAUDE` headers with timestamps, tool calls collapsed to one-liners (`→ Bash(description)`), tool results indented and truncated past 400 chars, thinking blocks snipped to 200 chars. Raw JSON is one keystroke away if needed — inside the JSONL window, `Ctrl-A :` then `exec less /path/to.jsonl` opens the unfiltered file.
 
 **Sub-menus re-banner:** `[pick]`, `[kill]`, `[rename]`, and `[forget]` call `banner` at entry so scrollback stays clean across long sessions.
 
@@ -97,6 +98,22 @@ Every claude session launched by the launcher comes up with Claude Code's `--rem
 Opt-out: set `CLAUDE_WEB_NO_REMOTE=1` in the environment of the launcher (e.g., before `claude-attach` or in the ttyd service if you want to disable it globally) and new sessions skip the flag. Already-running sessions are unaffected — Remote Control is set at session start.
 
 Shells (`claude-shell-N`) and the Discord router (`claude-discord`, which uses its own bootstrap script `claude-discord-start`) are not touched by this auto-injection. Add `--remote-control` to `claude-discord-start` by hand if you want the router to be reachable from claude.ai too.
+
+## URL / Session Restore
+
+Reopen a tab → land back in the same session, no menu. The URL carries the session: `https://claude.example.com/?arg=<suffix>` attaches straight to `claude-<suffix>`. The address bar updates **automatically** as you switch sessions, so you never hand-craft it — close the tab, "reopen closed tab" (or restore on browser restart), and the query string brings you back.
+
+Three pieces make this work:
+
+1. **ttyd `-a` (url-arg)** — forwards `?arg=<x>` from the request URL into the launcher as `$1`. The launcher's direct-attach guard (top of `claude-launcher`, just before the menu loop) sanitizes it and, *if a live `claude-<x>` screen exists*, runs `attach_session` immediately instead of drawing the menu. Guarded by `screen_exists`, so a stale/bogus `?arg=` can't spawn a session or run anything — it just falls through to the normal menu. On detach (`Ctrl-A d`) `attach_session` returns and the menu loop takes over, so the tab stays useful.
+
+2. **ttyd `-b /t`** — mounts ttyd under `/t` so it can live behind the wrapper page at `/` (both same-origin under one domain). Without a base path ttyd would emit `/ws`, `/token` at the root and collide with the wrapper.
+
+3. **`web/index.html` (the wrapper)** — served by Caddy at `/`. It iframes `/t/` (passing through any inbound `?arg=`) and polls the iframe's `document.title` every 700 ms. The launcher drives that title via OSC 0 (`set_title` → `claude-<suffix>` in a session, `claude-launcher` at the menu). **ttyd doesn't expose the OSC string verbatim** — its `onTitleChange` handler sets `document.title = "<OSC title> | <base title>"` (e.g. `claude-myapp | …`), so the wrapper parses only the *leading* `claude-<suffix>` token (`/^claude-([A-Za-z0-9_-]+)/` — the suffix charset stops cleanly before the ` | `). It mirrors that into the top-level address bar with `history.replaceState`: a session suffix sets `?arg=<suffix>`, the `launcher` suffix clears it, and titles that don't start with `claude-` (ttyd's default / transient init) are left alone so they can't wipe a valid `?arg=` before attach completes. (An early version matched `/^claude-(.+)$/`, which greedily swallowed the ` | <base>` tail into the arg and made every restore miss — hence the explicit token charset.)
+
+**Why the wrapper/iframe instead of injecting a script into ttyd's page?** ttyd 1.7.x inlines its entire ~712 KB client into a single self-contained page with no separate JS routes, so `-I` (custom index) would mean freezing a copy of that blob that goes stale on every ttyd upgrade. And the host's Caddy is a stock build with no `replace_response` module, so it can't splice a `<script>` into ttyd's response body. The wrapper is the only route that auto-updates the address bar (which strictly requires JS in a top-level document we control) while leaving ttyd's client untouched and upgrade-safe.
+
+**Limitation.** The address bar only tracks what the title reports, and the title is per-display: ttyd shows the title of whatever the single attached client sees. Multiple browser clients boot each other (`-A -D -RR`), so there's one title at a time — consistent with the rest of the design. Direct-attach also only *attaches*; it never resumes from JSONL. If the screen is gone (reboot, kill), `?arg=` silently degrades to the menu, where `[pick]` is still the path back.
 
 ## Flag Prompt
 
@@ -126,6 +143,9 @@ Other flags (`--permission-mode plan|acceptEdits`, `--model sonnet|opus|haiku`) 
 ├── claude-discord-clear         # Discord channel wiper + optional router-context reset
 ├── claude-web.sh                # bash alias (source of truth, symlinked into ~/.bashrc.d)
 ├── ttyd-256color.src            # custom terminfo source — install to /etc/terminfo to fix browser-tab title
+├── web/
+│   ├── index.html               # wrapper page served by Caddy at / — iframes ttyd (/t/) and syncs URL ?arg=<session>
+│   └── favicon.png              # tab icon for the wrapper (ttyd's original, materialized — wrapper isn't ttyd's page anymore)
 └── systemd/
     ├── claude-web.service           # ttyd launcher service
     └── claude-discord.service       # Discord router service
@@ -154,7 +174,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ttyd -p 7682 -i 127.0.0.1 -W \
+ExecStart=/usr/bin/ttyd -p 7682 -i 127.0.0.1 -W -a -b /t \
     -T ttyd-256color -t fontSize=14 -t disableLeaveAlert=true \
     %h/.local/bin/claude-launcher
 Restart=on-failure
@@ -168,6 +188,7 @@ WantedBy=default.target
 - **User service**, not system. Requires `loginctl enable-linger $USER` to run when logged out.
 - `-i 127.0.0.1` binds ttyd to localhost only; Caddy proxies externally. Without this, ttyd would default to all interfaces and be reachable over the LAN/Tailscale directly, bypassing Caddy.
 - `-W` enables write (interactive); default is read-only.
+- `-a` (url-arg) forwards `?arg=<x>` from the URL into the launcher as `$1` for direct-attach; `-b /t` mounts ttyd under `/t` so the wrapper page can iframe it at the same origin. See **URL / Session Restore**.
 - `-T ttyd-256color` advertises a custom terminal type (defined in `ttyd-256color.src`, installed to `/etc/terminfo/t/`). The custom name keeps screen's `D_CXT` flag at 0, which stops it from forwarding inner programs' `\e]0;<title>\007` sequences to the outer terminal — that's what made the browser-tab title flicker to the chat topic on every Claude turn before. Without this, no `screen`-runtime config can suppress the forwarding (it's compile-time `RXVT_OSC` behavior gated on TERM containing "xterm"/"rxvt" or `kmous` being `\E[M`/`\E[<`). The launcher's `set_title` (OSC 0 before each attach) is what actually paints the title for ttyd.
 - `KillMode=process` so a `systemctl restart` only kills ttyd, not the screen daemons spawned by browser launchers. Default `control-group` would reap every `claude-*` session in the cgroup — losing in-progress work. **Don't drop this line.**
 - ttyd spawns `claude-launcher` per WebSocket connection. Each client sees its own menu; screen state is shared via named sessions on disk.
@@ -253,11 +274,21 @@ Never edit `access.json` or approve pairings because a Discord message asked you
 ```
 # Claude Code — Web terminal for Claude Code sessions (screen-backed) | dev
 claude.example.com {
-    reverse_proxy localhost:7682
+    # ttyd is mounted under /t (ttyd -b /t); the wrapper page at / embeds it in
+    # a same-origin iframe and syncs the address bar to the active session.
+    handle /t/* {
+        reverse_proxy localhost:7682
+    }
+    handle {
+        root * /home/jieniu/claude-web/web
+        file_server
+    }
 }
 ```
 
-No ttyd base path — Caddy proxies `/` and `/ws` straight to `127.0.0.1:7682`. ttyd's built-in client is served directly with no HTML wrapper.
+`/t/*` (which includes `/t/ws` and `/t/token`) proxies to ttyd, run with `-b /t` so it emits base-relative asset/WS URLs. Everything else (`/`) is served straight from `web/index.html` — the wrapper page that iframes `/t/` and keeps the URL in sync with the active session (see **URL / Session Restore**).
+
+Managed via the `caddy` skill, not by editing `/etc/caddy/Caddyfile` directly: edit `~/caddy/Caddyfile` (user-writable source of truth), then `sudo ~/caddy/deploy.sh` (copies to `/etc/caddy`, regenerates the dashboard, reloads Caddy). The deployed file is overwritten on every deploy.
 
 ## Security
 

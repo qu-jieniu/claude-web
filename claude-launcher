@@ -642,4 +642,17 @@ run_menu() {
     done
 }
 
+# Direct-attach from URL: ttyd (-a) passes ?arg=<suffix> as $1. If it names a
+# live screen, jump straight in so a reopened/bookmarked tab (and the wrapper
+# page's per-session URL) lands back in the same session. Guarded by
+# screen_exists so a bogus arg can't spawn a session or run anything — it just
+# falls through to the normal menu. On detach, attach_session returns and the
+# loop below shows the menu, so the tab stays useful.
+if [ -n "${1:-}" ]; then
+    suffix=$(sanitize "${1#claude-}")
+    if [ -n "$suffix" ] && screen_exists "claude-$suffix"; then
+        attach_session "$suffix"
+    fi
+fi
+
 while true; do run_menu; done

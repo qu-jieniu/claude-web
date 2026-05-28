@@ -4,7 +4,13 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ttyd -p 7682 -i 127.0.0.1 -W -T ttyd-256color -t fontSize=14 -t disableLeaveAlert=true %h/.local/bin/claude-launcher
+# -a forwards ?arg=<suffix> from the URL as a positional arg to the launcher,
+# enabling direct-attach (.../?arg=myapp -> claude-myapp). The launcher guards
+# the arg with sanitize + screen_exists, so a bogus value just shows the menu
+# rather than spawning/running anything.
+# -b /t mounts ttyd under /t so the wrapper page (served by Caddy at /) can
+# embed it in a same-origin iframe and sync the URL to the active session.
+ExecStart=/usr/bin/ttyd -p 7682 -i 127.0.0.1 -W -a -b /t -T ttyd-256color -t fontSize=14 -t disableLeaveAlert=true %h/.local/bin/claude-launcher
 Restart=on-failure
 RestartSec=2
 # Restart only kills ttyd; leaves browser-spawned screen daemons alone.
