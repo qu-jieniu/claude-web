@@ -65,7 +65,13 @@ def humanize_eta(seconds: int) -> str:
 
 
 def project_dir_for(cwd: str) -> str:
-    return f"{PROJECTS_DIR}/" + cwd.replace("/", "-").replace(".", "-")
+    # Claude encodes the project dir by replacing every non-alphanumeric char
+    # with '-' (so '/', '.', '_' and '-' all collapse to '-'), no collapsing of
+    # runs. Earlier this only handled '/' and '.', so any cwd with '_' (e.g.
+    # /home/jieniu/.containers/read_later, which Claude stores as
+    # "...-read-later") resolved to a nonexistent dir and the ctx segment
+    # silently fell back to "ctx -".
+    return f"{PROJECTS_DIR}/" + re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 def read_env(name: str) -> dict | None:

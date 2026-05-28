@@ -52,9 +52,6 @@ apply_session_config() {
     screen -S "$sname" -X source "$rc" 2>/dev/null || true
 }
 
-# Given a cwd, return the encoded ~/.claude/projects/ dir name: / and . → -
-project_dir_for() { printf '%s/%s' "$PROJECTS_DIR" "$(printf '%s' "$1" | sed 's|[/.]|-|g')"; }
-
 short_name_for() {
     local path="$1" base
     if [ "$path" = "$HOME" ]; then echo "home"; return; fi
