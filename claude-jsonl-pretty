@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""claude-jsonl-pretty — stream a Claude Code JSONL as readable transcript.
+"""claude-jsonl-pretty — format a Claude Code JSONL as readable transcript.
 
 Reads the file from start, formats each JSONL event as a human-readable
-block, then tails forever for new lines as Claude appends them. Designed
-to be piped into `less +F` so the user sees the same content they'd see
-in the TUI without the raw JSON noise.
+block, then exits at EOF. Designed to be piped into `less -R` so the
+viewer behaves like a normal pager (scroll, search, (END) marker, q to
+quit). To see new turns added after opening, close and re-open the view.
 
 Usage: claude-jsonl-pretty <path>
 """
 from __future__ import annotations
 import json
 import sys
-import time
 from datetime import datetime
 
 
@@ -139,16 +138,11 @@ def main() -> int:
         print(f"cannot open {path}: {e}", file=sys.stderr)
         return 1
     try:
-        while True:
-            line = fp.readline()
-            if line:
-                out = fmt(line)
-                if out:
-                    sys.stdout.write(out)
-                    sys.stdout.flush()
-            else:
-                time.sleep(0.5)
-    except (BrokenPipeError, KeyboardInterrupt):
+        for line in fp:
+            out = fmt(line)
+            if out:
+                sys.stdout.write(out)
+    except BrokenPipeError:
         pass
     return 0
 

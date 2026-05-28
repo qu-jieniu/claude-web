@@ -25,8 +25,10 @@ if [ -z "$jsonl" ] || [ ! -f "$jsonl" ]; then
     exit 1
 fi
 
-# Pipe the JSONL through the pretty-printer (which formats each event and
-# tails forever) into `less +F` for live follow + scrollback + search.
-# `q` exits less and SIGPIPE tears down the python tailer cleanly.
-# Raw JSON is one keystroke away if needed:  Ctrl-A : exec less +F <path>
-"$HOME/claude-web/claude-jsonl-pretty" "$jsonl" | less -R +F
+# Pipe the formatted JSONL into less. The pretty-printer dumps existing
+# content and exits at EOF, so less shows (END) at the bottom and behaves
+# like a normal pager — no follow mode, no "Waiting for data" surprise.
+# +G jumps to the end on open so the most-recent turn is visible; user
+# scrolls up for older content. To see new turns appended after opening,
+# close (q) and re-press Ctrl-A j.
+"$HOME/claude-web/claude-jsonl-pretty" "$jsonl" | less -R +G
