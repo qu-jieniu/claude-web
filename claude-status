@@ -96,14 +96,32 @@ def newest_jsonl(cwd: str) -> str | None:
 
 
 def screen_pid(sname: str) -> int | None:
+    """Find the SCREEN server PID by process table, NOT `screen -ls`.
+
+    This runs from inside a screen backtick; `screen -ls` talks to every
+    session socket and can deadlock against the very server that spawned
+    us (seen 2026-06-06: one wedged server made every -ls/attach hang
+    system-wide). pgrep never touches screen's socket protocol — and is
+    faster. Match on the exact session name: SCREEN argv always carries
+    `-S <name>` (uppercase comm = server, lowercase = client)."""
     try:
-        out = subprocess.check_output(["screen", "-ls"], text=True, stderr=subprocess.DEVNULL)
+        out = subprocess.check_output(
+            # -[A-Za-z]*S covers both `-S name` and combined flags like
+            # `-DmS name` (claude-discord's bootstrap uses the latter).
+            # argv[0] is `SCREEN` for launcher-spawned servers but
+            # `/usr/bin/SCREEN` for systemd-spawned ones (claude-discord).
+            ["pgrep", "-f", rf"^(\S*/)?SCREEN\b.*-[A-Za-z]*S {re.escape(sname)}( |$)"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        )
     except Exception:
         return None
-    for line in out.splitlines():
-        m = re.match(r"\s*(\d+)\.(\S+)", line)
-        if m and m.group(2) == sname:
-            return int(m.group(1))
+    for pid in out.split():
+        try:
+            with open(f"/proc/{pid}/comm") as fp:
+                if fp.read().strip() == "screen":
+                    return int(pid)
+        except Exception:
+            continue
     return None
 
 
