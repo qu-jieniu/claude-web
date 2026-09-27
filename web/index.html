@@ -11,7 +11,13 @@
 <title>omp</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overscroll-behavior: none; }
-  iframe { border: 0; width: 100%; height: 100%; display: block; }
+  /* NO width/height on the iframe: sizing is JS-owned (applyLiveSize) with
+     explicit px at all times. CSS 100% let the browser resize the iframe
+     during layout — BEFORE the freeze handler could pin it — so every window
+     resize/keyboard-open hit ttyd's refit and tmux reset the copy-mode
+     position (the "scrolls to bottom on resize" bug). Explicit px = the
+     browser never resizes it implicitly; JS decides, and skips while frozen. */
+  iframe { border: 0; display: block; }
   /* Mobile key bar: coarse pointers only (phones/tablets). Desktop never
      sees it; every key it sends exists on a real keyboard anyway. */
   #keys {
@@ -19,7 +25,7 @@
     padding-left: max(6px, env(safe-area-inset-left)); padding-right: max(6px, env(safe-area-inset-right));
     background: #111; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch;
   }
-  @media (pointer: coarse) { #keys { display: flex; } body { display: flex; flex-direction: column; } iframe { height: auto; flex: 1 1 auto; min-height: 0; } }
+  @media (pointer: coarse) { #keys { display: flex; } }
   #keys button {
     flex: 0 0 auto; min-width: 44px; min-height: 40px; border-radius: 8px;
     background: #222; color: #ccc; border: 1px solid #333;
@@ -57,6 +63,9 @@
   var arg = new URLSearchParams(location.search).get('arg');
   f.src = '/t/?rendererType=dom' + (arg ? '&arg=' + encodeURIComponent(arg) : '');
   f.addEventListener('load', function () { try { f.contentWindow.focus(); } catch (e) {} });
+  // initial JS-owned sizing (applyLiveSize exists below; resize listener keeps
+  // it current; the 700ms tick also re-asserts it)
+  window.addEventListener('DOMContentLoaded', function () { if (typeof applyLiveSize === 'function') applyLiveSize(); });
 
   function term() {
     try { return f.contentWindow && f.contentWindow.term; } catch (e) { return null; }
@@ -92,6 +101,19 @@
     }
     return false;
   }
+  // JS-owned sizing: explicit px at all times so the browser never resizes
+  // the iframe implicitly (CSS 100% resized it during layout, before the
+  // freeze could pin it — the residual "scrolls to bottom on resize" path).
+  function applyLiveSize() {
+    if (frozen) return;
+    var bar = document.getElementById('keys');
+    var barH = (bar && bar.offsetHeight) || 0;
+    var vv = window.visualViewport;
+    var visible = (vv && vv.height < window.innerHeight - 40) ? vv.height : window.innerHeight;
+    f.style.flex = '0 0 auto';
+    f.style.width = window.innerWidth + 'px';
+    f.style.height = Math.max(120, Math.round(visible) - barH) + 'px';
+  }
   function freezeCheck() {
     var t = term(); if (!t) return;
     var mode = t.modes && t.modes.mouseTrackingMode;
@@ -100,15 +122,14 @@
     var live = isLiveView();
     if (frozen && (live || mode === 'none' || keyboard)) {
       frozen = false;
-      f.style.width = ''; f.style.height = ''; f.style.flex = '';
     }
     if (!frozen && mode !== 'none' && !live && !keyboard) {
-      frozen = true;
       var r = f.getBoundingClientRect();
       f.style.width = Math.round(r.width) + 'px';
       f.style.height = Math.round(r.height) + 'px';
-      f.style.flex = '0 0 auto';
+      frozen = true;
     }
+    if (!frozen) applyLiveSize();
   }
   window.addEventListener('resize', function () { freezeCheck(); probeBottom(); setTimeout(pin, 60); setTimeout(pin, 350); });
   window.addEventListener('wheel', function () { freezeCheck(); }, true);
@@ -122,18 +143,8 @@
   if (window.visualViewport) {
     var vv = window.visualViewport;
     var vvFit = function () {
-      var h = Math.round(vv.height);
-      if (h < window.innerHeight - 40) {           // keyboard open — typing wins
-        frozen = false;
-        var bar = document.getElementById('keys');
-        var barH = (bar && bar.offsetHeight) || 0;  // incl. safe-area padding
-        f.style.width = '';
-        f.style.flex = '0 0 auto';
-        f.style.height = Math.max(120, h - barH) + 'px';
-      } else if (!frozen) {                         // closed, not reading
-        f.style.width = ''; f.style.flex = ''; f.style.height = '';
-      }
-      // closed while frozen: freezeCheck owns the styles — don't clobber
+      if (frozen) return;               // reading: frame stays put
+      applyLiveSize();                  // keyboard open/close or zoom: resize JS-owned
     };
     vv.addEventListener('resize', vvFit);
     vv.addEventListener('scroll', function () { window.scrollTo(0, 0); });
@@ -199,6 +210,10 @@
     }, { passive: false });
     el.addEventListener('touchend', endTouch, { passive: true });
     el.addEventListener('touchcancel', endTouch, { passive: true });
+    // Arm the reading freeze on the FIRST wheel event, not the next 700ms
+    // tick — iframe wheel events don't reach the parent window, so listen
+    // here; freezeCheck is cheap and idempotent.
+    el.addEventListener('wheel', function () { freezeCheck(); }, { capture: true, passive: true });
     // ⌃A armed + a keyboard letter → tmux prefix command. Best effort: some
     // Android IMEs never produce real keydown events; toolbar keys always work.
     el.addEventListener('keydown', function (e) {
@@ -269,7 +284,7 @@
     // initTouch before the title-diff guard: a reload into the SAME session
     // (identical title) must still arm handlers on the fresh terminal.
     initTouch();
-    freezeCheck();
+    freezeCheck();   // also re-asserts live size via applyLiveSize
     var t;
     try { t = f.contentDocument && f.contentDocument.title; } catch (e) { return; }
     if (!t || t === last) return;

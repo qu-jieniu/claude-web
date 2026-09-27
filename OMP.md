@@ -192,14 +192,19 @@ on one line; desktop re-expands when the phone detaches. `set-titles on` +
 title (the wrapper's arg-sync reads it — see Reload-restore).
 **Reading freeze**: tmux re-anchors copy-mode to the bottom on ANY pane resize
 (pos N → 0, even height-only; no tmux option preserves it), which yanked the
-reader back to the live view on every window resize/rotation. The wrapper now
-FREEZES the iframe at its current pixel size while the user reads (mouse
-tracking on + frozen transcript view, i.e. no composer visible): the pty never
-resizes, so the position survives perfectly — at the cost of black bars until
-copy-mode exits (the 700ms watcher unfreezes the moment the live view returns;
-keyboard-open also unfreezes — typing wins). Wheel/scroll on the frozen frame
-keeps working (same pty). The conditional pin (scroll to bottom on refit only
-if it was at the bottom) still guards the non-reading paths.
+reader back to the live view on every window resize/rotation. Two-layer fix:
+(1) iframe sizing is **JS-owned with explicit px at all times** — CSS `100%`
+let the browser resize the iframe during layout *before* any handler ran
+(the residual yank path in Chrome/Ferdium/keyboard); the wrapper's
+`applyLiveSize()` computes px from window/visualViewport minus the key bar,
+and nothing else ever touches the size. (2) While reading (mouse tracking on,
+no composer visible), `freezeCheck()` pins the frame at its current pixels:
+the pty never resizes, the position survives exactly, black bars show until
+copy-mode exits. The freeze arms instantly on the first wheel (listener
+inside the iframe — parent never sees those events), holds through
+keyboard-open (typing is impossible in copy-mode anyway), and releases the
+moment the composer returns. The conditional pin still guards live-view
+refits (only scrolls if it was at the bottom).
 **Locale:** the container exports `LANG=C.UTF-8` (`ENV` + entrypoint) —
 tmux marks a client non-UTF8 when its environment is POSIX and then rewrites
 the inner apps' unicode (box drawing etc.) to ACS on output, which mangled
