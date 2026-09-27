@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Render an omp JSONL transcript without trusting its terminal controls."""
+
+import argparse
+import json
+import shutil
+import sys
+import unicodedata
+from pathlib import Path
+
+
+def clean(text):
+    """Drop ECMA-48 controls, including incomplete and C1 escape sequences."""
+    result = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        index += 1
+        sequence = None
+        if char == "\x1b":
+            if index == len(text):
+                break
+            sequence = text[index]
+            if sequence in "[]PX^_":
+                index += 1
+            else:
+                while index < len(text) and " " <= text[index] <= "/":
+                    index += 1
+                if index < len(text) and "0" <= text[index] <= "~":
+                    index += 1
+                continue
+        elif char == "\x9b":
+            sequence = "["
+        elif char in "\x90\x98\x9d\x9e\x9f":
+            sequence = "]"
+        if sequence == "[":
+            while index < len(text):
+                code = ord(text[index])
+                if 0x40 <= code <= 0x7e:
+                    index += 1
+                    break
+                if not 0x20 <= code <= 0x3f:
+                    break
+                index += 1
+            continue
+        if sequence in ("]", "P", "X", "^", "_"):
+            while index < len(text):
+                if text[index] in "\x07\x9c":
+                    index += 1
+                    break
+                if text.startswith("\x1b\\", index):
+                    index += 2
+                    break
+                index += 1
+            continue
+        if char in "\n\t":
+            result.append(char)
+        elif unicodedata.category(char) not in ("Cc", "Cs") and char not in (
+            "\u061c", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c",
+            "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069",
+        ):
+            result.append(char)
+    return "".join(result)
+
+
+def cell_width(char):
+    if unicodedata.combining(char) or unicodedata.category(char) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def heading(label, width):
+    label = clean(label).replace("\n", " ").replace("\t", " ")
+    text = "─ " + label + " "
+    result = []
+    used = 0
+    for char in text:
+        cells = cell_width(char)
+        if used + cells > width:
+            break
+        result.append(char)
+        used += cells
+    return "".join(result) + "─" * (width - used)
+
+
+def value_text(value):
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+def content_lines(content):
+    if isinstance(content, str):
+        yield content
+        return
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if isinstance(block, str):
+            yield block
+            continue
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text" and isinstance(block.get("text"), str):
+            yield block["text"]
+        elif kind == "thinking" and isinstance(block.get("thinking"), str):
+            yield "[Thinking]\n" + block["thinking"]
+        elif kind == "toolCall":
+            name = block.get("name", "tool")
+            yield "[Tool call: " + str(name) + "]"
+            if isinstance(block.get("intent"), str):
+                yield block["intent"]
+            if "arguments" in block:
+                yield value_text(block["arguments"])
+        elif kind == "toolResult":
+            yield "[Tool result: " + str(block.get("toolName", block.get("name", "tool"))) + "]"
+            yield from content_lines(block.get("content"))
+        elif kind == "image":
+            yield "[Image: " + str(block.get("mimeType", "unknown type")) + "]"
+
+
+def render(record, width):
+    kind = record.get("type")
+    if kind == "session":
+        title = record.get("name") or record.get("title")
+        if isinstance(title, str) and title.strip():
+            print(heading("SESSION: " + title, width))
+        return
+    if kind == "compaction" and isinstance(record.get("summary"), str):
+        print("\n" + heading("COMPACTION SUMMARY", width))
+        print(clean(record["summary"]))
+        return
+    if kind == "custom_message":
+        if record.get("display") is False:
+            return
+        message = record
+        role = str(record.get("customType", "NOTICE"))
+    else:
+        message = record.get("message")
+        if not isinstance(message, dict):
+            return
+        role = message.get("role")
+        if not isinstance(role, str):
+            return
+    label = role.upper()
+    if role == "toolResult":
+        label = "TOOL RESULT: " + str(message.get("toolName", "tool"))
+        if message.get("isError"):
+            label += " (ERROR)"
+    print("\n" + heading(label, width))
+    for text in content_lines(message.get("content")):
+        print(clean(text))
+    if isinstance(message.get("errorMessage"), str):
+        print(clean("[Error] " + message["errorMessage"]))
+
+
+def positive_width(value):
+    width = int(value)
+    if width < 1:
+        raise argparse.ArgumentTypeError("width must be at least 1")
+    return width
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", type=Path, help="omp session JSONL file")
+    parser.add_argument("--width", type=positive_width,
+                        default=shutil.get_terminal_size((80, 24)).columns,
+                        help="separator width in terminal cells (default: terminal width)")
+    args = parser.parse_args()
+    try:
+        with args.path.open(encoding="utf-8", errors="replace") as source:
+            for line in source:
+                try:
+                    record = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if isinstance(record, dict):
+                    try:
+                        render(record, args.width)
+                    except RecursionError:
+                        continue
+    except BrokenPipeError:
+        return 0
+    except OSError as error:
+        print(clean(f"omp-jsonl-pretty: cannot read {args.path}: {error}"), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

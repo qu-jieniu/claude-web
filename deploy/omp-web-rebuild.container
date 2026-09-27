@@ -1,0 +1,16 @@
+[Unit]
+Description=Clean-room omp-web preview (isolated from production)
+After=default.target
+
+[Container]
+ContainerName=omp-web-rebuild
+Image=localhost/omp-web-rebuild:18.3.2-2
+PublishPort=127.0.0.1:17685:8080
+Volume=omp-web-rebuild-home:/root
+
+[Service]
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Read an omp transcript snapshot in less; q closes the viewer."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+def normalized(path):
+    return os.path.realpath(os.path.expanduser(path))
+
+
+def session_cwd(path):
+    """Read the real session header, not its lossy parent directory name."""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as source:
+            for line in source:
+                try:
+                    record = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") == "session":
+                    cwd = record.get("cwd")
+                    return normalized(cwd) if isinstance(cwd, str) and cwd else None
+                if record.get("type") == "message":
+                    return None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def newest_session(root, cwd):
+    newest = None
+    newest_key = None
+    for directory, _, names in os.walk(root):
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            path = Path(directory) / name
+            try:
+                key = (path.stat().st_mtime_ns, str(path))
+            except OSError:
+                continue
+            if newest_key is not None and key <= newest_key:
+                continue
+            if session_cwd(path) == cwd:
+                newest = path
+                newest_key = key
+    return newest
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("path", nargs="?", type=Path, help="explicit JSONL file")
+    selection.add_argument("--cwd", type=Path, help="project cwd (default: current directory)")
+    parser.add_argument("--popup", action="store_true",
+                        help="keep a short snapshot open in a quiet tmux popup")
+    args = parser.parse_args()
+    if args.path is not None:
+        path = args.path.expanduser().resolve()
+        if not path.is_file():
+            print(f"omp-jsonl-view: no transcript file at {ascii(str(path))}; "
+                  "pass an existing JSONL path or use --cwd PROJECT.", file=sys.stderr)
+            return 1
+    else:
+        cwd = normalized(str(args.cwd) if args.cwd is not None else os.getcwd())
+        root = Path(os.environ.get("OMP_SESSION_DIR", "~/.omp/agent/sessions")).expanduser()
+        path = newest_session(root, cwd)
+        if path is None:
+            print(f"omp-jsonl-view: no saved session has header cwd {ascii(cwd)} "
+                  f"under {ascii(str(root))}. Start an omp session there, set "
+                  "OMP_SESSION_DIR to its session store, or pass an explicit JSONL path.",
+                  file=sys.stderr)
+            return 1
+    pager = shutil.which("less")
+    if pager is None:
+        print("omp-jsonl-view: less is not installed; install less or run "
+              "omp-jsonl-pretty FILE directly.", file=sys.stderr)
+        return 1
+    formatter = Path(__file__).resolve().with_name("omp-jsonl-pretty")
+    width = max(1, shutil.get_terminal_size((80, 24)).columns)
+    try:
+        # Complete formatting before starting less: this is a snapshot, not a tail.
+        with tempfile.TemporaryFile(mode="w+b") as snapshot:
+            result = subprocess.run(
+                [sys.executable, str(formatter), "--width", str(width), "--", str(path)],
+                stdout=snapshot, check=False,
+            )
+            if result.returncode:
+                return result.returncode
+            snapshot.seek(0)
+            command = [pager, "-R", "-Q"]
+            if args.popup:
+                command.append("-+F")
+            return subprocess.run(command, stdin=snapshot, check=False).returncode
+    except OSError as error:
+        print(f"omp-jsonl-view: cannot open snapshot pager: {ascii(str(error))}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

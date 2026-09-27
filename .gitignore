@@ -1,0 +1,4 @@
+node_modules/
+web/vendor/
+__pycache__/
+*.pyc

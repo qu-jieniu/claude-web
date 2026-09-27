@@ -1,0 +1,18 @@
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:{$OMP_HTTP_PORT} {
+	bind {$OMP_BIND_ADDRESS}
+	header X-Content-Type-Options nosniff
+	header Cache-Control no-store
+	handle /t/* {
+		reverse_proxy 127.0.0.1:{$OMP_TERMINAL_PORT}
+	}
+	handle {
+		root * {$OMP_WEB_ROOT}/web
+		file_server
+	}
+}

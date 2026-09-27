@@ -1,0 +1,12 @@
+{
+  "name": "omp-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node build-web.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0"
+  }
+}

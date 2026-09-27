@@ -1,0 +1,5 @@
+# Applied only to omp processes launched by this application.
+# Preserve native history when the mobile keyboard changes terminal height.
+tui:
+  mouse: true
+  resizeScrollback: preserve

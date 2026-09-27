@@ -1,0 +1,494 @@
+#!/usr/bin/env python3
+"""Interactive, shared local/web entry point for persistent omp terminals."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import readline
+import shutil
+import subprocess
+import sys
+import unicodedata
+from dataclasses import dataclass
+
+ROOT = Path(__file__).resolve().parent
+UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
+UUID_PREFIX = re.compile(r"[0-9a-fA-F][0-9a-fA-F-]{0,35}\Z")
+OMP_COMMAND = '"$@"; result=$?; if [ "$result" -ne 0 ]; then exit "$result"; fi; exec /bin/bash -i'
+
+
+def clean(value):
+    """Do not let saved names, paths, or multiplexer labels emit controls."""
+    return "".join(c for c in str(value) if not unicodedata.category(c).startswith("C"))
+
+
+def clipped(value, width):
+    text = clean(value)
+    cells = [0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text]
+    if sum(cells) <= width:
+        return text
+    output, used = [], 0
+    for char, size in zip(text, cells):
+        if used + size > max(0, width - 1):
+            break
+        output.append(char)
+        used += size
+    return "".join(output) + ("…" if width else "")
+
+
+def line(text=""):
+    print(clipped(text, max(1, shutil.get_terminal_size((80, 24)).columns - 1)))
+
+
+def title(value):
+    if sys.stdout.isatty():
+        print("\033]0;" + clean(value) + "\007", end="", flush=True)
+
+
+def prompt(label, default=""):
+    try:
+        answer = input(clipped(label, max(1, shutil.get_terminal_size((80, 24)).columns - 1))).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    return answer or default
+
+
+def number(value, size):
+    # Bound the string before conversion: huge inputs never reach int().
+    if value and value.isascii() and value.isdigit() and len(value) <= len(str(size)):
+        choice = int(value)
+        if 1 <= choice <= size:
+            return choice - 1
+    return None
+
+
+def suffix(value):
+    value = re.sub(r"^(?:omp-|claude-)", "", value)
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-") or "omp"
+
+
+def canonical(path):
+    return os.path.realpath(os.path.expanduser(str(path)))
+
+
+def complete_path(text, state):
+    if text == "~":
+        return "~/" if state == 0 else None
+    expanded = os.path.expanduser(text)
+    parent, prefix = os.path.split(expanded)
+    typed_parent = text[:len(text) - len(prefix)] if prefix else text
+    try:
+        matches = [typed_parent + name + "/" for name in sorted(os.listdir(parent or "."))
+                   if name.startswith(prefix) and os.path.isdir(os.path.join(parent, name))]
+    except OSError:
+        matches = []
+    return matches[state] if state < len(matches) else None
+
+
+def project_path():
+    old_completer = readline.get_completer()
+    old_delimiters = readline.get_completer_delims()
+    readline.set_completer(complete_path)
+    readline.set_completer_delims("")
+    readline.parse_and_bind("tab: complete")
+    try:
+        raw = prompt(f"Project path [{os.getcwd()}] (Tab completes): ", os.getcwd())
+    finally:
+        readline.set_completer(old_completer)
+        readline.set_completer_delims(old_delimiters)
+    if raw is None:
+        return None
+    path = canonical(raw)
+    if not os.path.exists(path):
+        answer = prompt(f"Create {path}? [Y/n]: ", "y")
+        if answer is None or answer.lower() not in ("y", "yes"):
+            return None
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as error:
+            line(f"Cannot create directory: {error}")
+            return None
+    if not os.path.isdir(path):
+        line("That path is not a directory.")
+        return None
+    return path
+
+
+def approve():
+    answer = prompt("Auto-approve all tool calls (--auto-approve)? [y/N]: ", "n")
+    return None if answer is None else answer.lower() in ("y", "yes")
+
+
+@dataclass
+class Window:
+    session: str
+    index: str
+    name: str
+    id: str
+    active: bool
+    dead: bool
+    path: str
+
+
+@dataclass
+class Pane:
+    id: str
+    window: str
+    dead: bool
+    path: str
+    command: str
+
+
+@dataclass
+class SavedSession:
+    id: str
+    cwd: str
+    name: str
+    timestamp: str
+    file: Path
+    modified: float
+
+
+def saved_sessions():
+    root = Path(os.environ.get("OMP_SESSION_DIR", "~/.omp/agent/sessions")).expanduser()
+    sessions = {}
+    for path in sorted(set(root.glob("*.jsonl")) | set(root.glob("*/*.jsonl"))):
+        header, name = None, ""
+        try:
+            modified = path.stat().st_mtime
+            with path.open(encoding="utf-8", errors="replace") as stream:
+                for raw in stream:
+                    if not re.search(r'"type"\s*:\s*"(?:session|title|session_info|session_name|session-name)"', raw):
+                        continue
+                    try:
+                        event = json.loads(raw)
+                    except (ValueError, RecursionError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    kind = event.get("type")
+                    if kind == "session" and header is None:
+                        header = event
+                        name = name or event.get("name") or event.get("title") or ""
+                    elif kind == "title":
+                        name = event.get("title") or name
+                    elif kind in ("session_info", "session_name", "session-name"):
+                        name = event.get("name") or event.get("title") or name
+            if not header or not isinstance(header.get("id"), str) or not UUID.fullmatch(header["id"]):
+                continue
+            if not isinstance(header.get("cwd"), str) or not os.path.isabs(header["cwd"]):
+                continue
+            cwd = canonical(header["cwd"])
+            if not os.path.isdir(cwd):
+                continue
+            record = SavedSession(header["id"].lower(), cwd, str(name), str(header.get("timestamp", "")), path, modified)
+            previous = sessions.get(record.id)
+            if previous is None or previous.modified < modified:
+                sessions[record.id] = record
+        except OSError:
+            continue
+    return sorted(sessions.values(), key=lambda record: record.modified, reverse=True)
+
+
+class Multiplexer:
+    def __init__(self):
+        self.command = ["tmux", "-u"]
+        if os.environ.get("OMP_TMUX_SOCKET"):
+            self.command += ["-S", os.path.expanduser(os.environ["OMP_TMUX_SOCKET"])]
+        self.session = os.environ.get("OMP_TMUX_SESSION", "1")
+        if not self.session or any(c in self.session for c in ":.\n\r"):
+            raise ValueError("OMP_TMUX_SESSION must be a nonempty tmux session name without colon, dot, or newline")
+        self.env = os.environ.copy()
+        self.env.update(TERM="xterm-256color", LANG="C.UTF-8", LC_ALL="C.UTF-8")
+        self.env.setdefault("OMP_WEB_ROOT", str(ROOT))
+        if self.env.get("OMP_SESSION_DIR"):
+            self.env["OMP_SESSION_DIR"] = canonical(self.env["OMP_SESSION_DIR"])
+        current_socket = self.env.get("TMUX", "").rsplit(",", 2)[0]
+        self.inside = bool(current_socket) and (
+            not self.env.get("OMP_TMUX_SOCKET")
+            or canonical(current_socket) == canonical(self.env["OMP_TMUX_SOCKET"])
+        )
+        if not self.inside:
+            self.env.pop("TMUX", None)
+
+    def run(self, *args, quiet=False, fresh=False):
+        command = self.command + (["-f", str(ROOT / "tmux.conf")] if fresh else []) + list(args)
+        try:
+            result = subprocess.run(command, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            if not quiet:
+                line("tmux is not installed or not on PATH.")
+            return None
+        if result.returncode:
+            if not quiet:
+                line(result.stderr.strip() or "tmux command failed.")
+            return None
+        return result.stdout
+
+    def windows(self):
+        format_ = "\t".join(["#{session_name}", "#{window_index}", "#{window_name}", "#{window_id}",
+                            "#{window_active}", "#{pane_dead}", "#{?pane_current_path,#{pane_current_path},#{pane_start_path}}"])
+        output = self.run("list-windows", "-a", "-F", format_, quiet=True) or ""
+        result = []
+        for raw in output.splitlines():
+            fields = raw.split("\t", 6)
+            if len(fields) == 7:
+                session, index, name, id_, active, dead, path = fields
+                result.append(Window(session, index, name, id_, active == "1", dead == "1", path))
+        return sorted(result, key=lambda window: (window.session, int(window.index)))
+
+    def panes(self):
+        format_ = "\t".join(["#{pane_id}", "#{window_id}", "#{pane_dead}",
+                            "#{?pane_current_path,#{pane_current_path},#{pane_start_path}}", "#{pane_start_command}"])
+        output = self.run("list-panes", "-a", "-F", format_, quiet=True) or ""
+        result = []
+        for raw in output.splitlines():
+            fields = raw.split("\t", 4)
+            if len(fields) == 5:
+                id_, window, dead, path, command = fields
+                result.append(Pane(id_, window, dead == "1", path, command))
+        return result
+
+    def attach(self, window=None, pane=None):
+        if pane is not None and self.run("select-pane", "-t", pane) is None:
+            return False
+        action = "switch-client" if self.inside else "attach-session"
+        try:
+            # Keep the tty on stdout too: switch-client uses it to identify its client.
+            result = subprocess.run(self.command + [action] + (["-t", window] if window else []), env=self.env)
+            if result.returncode:
+                line("Could not attach; the target may have closed.")
+            elif self.inside:
+                return True
+        except FileNotFoundError:
+            line("tmux is not installed or not on PATH.")
+        return False
+
+    def unique_name(self, name):
+        names = {window.name for window in self.windows() if window.session == self.session}
+        base, candidate, count = suffix(name), suffix(name), 2
+        while candidate in names:
+            candidate = f"{base}-{count}"
+            count += 1
+        return candidate
+
+    def create(self, cwd, name, command):
+        name = self.unique_name(name)
+        sessions = self.run("list-sessions", "-F", "#{session_name}", quiet=True)
+        if sessions is not None and self.session in sessions.splitlines():
+            return self.run("new-window", "-d", "-P", "-F", "#{window_id}", "-t", f"={self.session}:",
+                            "-n", name, "-c", cwd, *command)
+        return self.run("new-session", "-d", "-P", "-F", "#{window_id}", "-s", self.session,
+                        "-n", name, "-c", cwd, *command, fresh=sessions is None)
+
+
+def screens():
+    try:
+        result = subprocess.run(["screen", "-ls"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return []
+    found = []
+    for raw in result.stdout.splitlines():
+        match = re.match(r"\s*(\d+\.omp-([A-Za-z0-9_-]+))\s+.*\((Attached|Detached)\)\s*$", raw)
+        if match:
+            found.append((match[1], match[2], match[3]))
+    return found
+
+
+def attach_screen(screen):
+    title("omp-" + screen[1])
+    # -r attaches only an existing session; unlike -R/-RR it never creates one.
+    try:
+        subprocess.run(["screen", "-D", "-r", screen[0]])
+    except FileNotFoundError:
+        line("screen is not installed or not on PATH.")
+
+
+def omp_command(auto, session=None):
+    args = ["omp", "--resume", session.id] if session else ["omp", "-c"]
+    args += ["--allow-home", "--config", str(ROOT / "omp-config.yml")]
+    if os.environ.get("OMP_SESSION_DIR"):
+        args += ["--session-dir", canonical(os.environ["OMP_SESSION_DIR"])]
+    if auto:
+        args.append("--auto-approve")
+    return ["/bin/bash", "-lc", OMP_COMMAND, "omp-window", *args]
+
+
+def new_window(mux, shell=False):
+    cwd = project_path()
+    if cwd is None:
+        return False
+    default = "shell" if shell else suffix(Path(cwd).name)
+    name = prompt(f"Window name [{default}]: ", default)
+    if name is None:
+        return False
+    auto = False if shell else approve()
+    if auto is None:
+        return False
+    command = ["/bin/bash", "-il"] if shell else omp_command(auto)
+    window = mux.create(cwd, name, command)
+    return mux.attach(window.strip()) if window else False
+
+
+def choose_session(records):
+    if not records:
+        line("No saved sessions with an existing project directory.")
+        return None
+    projects = {}
+    for record in records:
+        projects.setdefault(record.cwd, []).append(record)
+    project_names = list(projects)
+    while True:
+        line()
+        line("Saved projects (enter a number or a unique UUID prefix; Enter cancels)")
+        for index, cwd in enumerate(project_names, 1):
+            line(f" {index}) {cwd} ({len(projects[cwd])} sessions)")
+        choice = prompt("Project / UUID: ")
+        if not choice or choice.lower() == "q":
+            return None
+        index = number(choice, len(project_names))
+        if index is None:
+            if UUID_PREFIX.fullmatch(choice):
+                matches = [record for record in records if record.id.startswith(choice.lower())]
+                if len(matches) == 1:
+                    return matches[0]
+                line("Ambiguous UUID prefix; enter more characters." if matches else "No session matches that UUID prefix.")
+            else:
+                line("Choose a listed number or a UUID prefix.")
+            continue
+        candidates = projects[project_names[index]]
+        while True:
+            line()
+            line("Sessions — " + project_names[index])
+            for position, record in enumerate(candidates, 1):
+                line(f" {position}) {record.id[:8]}  {record.timestamp[:19]}  {record.name or '(unnamed)'}")
+            selected = prompt("Session number (Enter cancels): ")
+            if not selected or selected.lower() == "q":
+                return None
+            session_index = number(selected, len(candidates))
+            if session_index is not None:
+                return candidates[session_index]
+            line("Choose a listed session number.")
+
+
+def resume(mux):
+    record = choose_session(saved_sessions())
+    if record is None:
+        return False
+    panes = mux.panes()
+    uuid_pattern = re.compile(r"(?<![0-9a-f-])" + re.escape(record.id) + r"(?![0-9a-f-])", re.I)
+    live = next((pane for pane in panes if not pane.dead and uuid_pattern.search(pane.command)), None)
+    if live:
+        line(f"Session already running in {live.window} / {live.id}; attaching.")
+        return mux.attach(live.window, live.id)
+    auto = approve()
+    if auto is None:
+        return False
+    dead = [pane for pane in panes if pane.dead and canonical(pane.path) == record.cwd]
+    dead.sort(key=lambda pane: (not bool(uuid_pattern.search(pane.command)), int(pane.id[1:])))
+    command = omp_command(auto, record)
+    if dead:
+        pane = dead[0]
+        # No -k: if another client revived it in the meantime, do not kill it.
+        if mux.run("respawn-pane", "-t", pane.id, "-c", record.cwd, *command) is None:
+            return False
+        return mux.attach(pane.window, pane.id)
+    window = mux.create(record.cwd, Path(record.cwd).name, command)
+    return mux.attach(window.strip()) if window else False
+
+
+def direct(mux, target):
+    if target == "tmux":
+        if mux.windows():
+            return mux.attach()
+    elif re.fullmatch(r"tmux-[0-9]+", target):
+        window_id = "@" + target[5:]
+        if any(window.id == window_id for window in mux.windows()):
+            return mux.attach(window_id)
+    elif re.fullmatch(r"[A-Za-z0-9_-]+", target):
+        matches = [screen for screen in screens() if screen[1] == target]
+        if len(matches) == 1:
+            attach_screen(matches[0])
+            return False
+    line("Direct target is invalid or no longer available; returning to the menu.")
+    return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Ctrl-a d detaches back to this menu. OMP_TMUX_SOCKET selects a socket path; OMP_TMUX_SESSION defaults to 1; OMP_SESSION_DIR selects saved session storage.")
+    parser.add_argument("target", nargs="?", help="tmux-N for stable window @N, tmux, or an existing legacy screen suffix")
+    target = sys.argv[1] if len(sys.argv) == 2 else None
+    if target in ("--help", "-h"):
+        parser.print_help()
+        return 0
+    try:
+        mux = Multiplexer()
+    except ValueError as error:
+        parser.error(str(error))
+    if len(sys.argv) > 2:
+        line("Invalid direct target; returning to the menu.")
+    elif target and direct(mux, target):
+        return 0
+    while True:
+        title("omp-launcher")
+        line()
+        line("omp — persistent terminals")
+        entries = []
+        previous = None
+        for window in mux.windows():
+            if previous != window.session:
+                line()
+                line("tmux session " + window.session)
+                previous = window.session
+            entries.append(("tmux", window))
+            state = "dead" if window.dead else "live"
+            active = "*" if window.active else " "
+            line(f" {len(entries)}) {active} [{window.session}:{window.index} {window.id} {state}] {window.name} — {window.path}")
+        legacy = screens()
+        if legacy:
+            line()
+            line("Legacy screen sessions")
+        for screen in legacy:
+            entries.append(("screen", screen))
+            line(f" {len(entries)}) {screen[0]} [{screen[2]}]")
+        line()
+        for text in ("s  [shell] New shell", "t  [tmux] Attach raw tmux", "w / n  New omp window in a project path", "p  Resume saved session", "q  Exit", "", "Ctrl-a d: detach to menu  |  Ctrl-a n/p: next/previous", "Ctrl-a [: scroll (PgUp/PgDn, / or ? search, q exits)", "Ctrl-a j: transcript snapshot  |  Ctrl-a c: new omp"):
+            line(text)
+        choice = prompt("Choice: ")
+        if choice is None or choice.lower() == "q":
+            return 0
+        try:
+            index = number(choice, len(entries))
+            if index is not None:
+                kind, entry = entries[index]
+                if kind == "tmux":
+                    if mux.attach(entry.id):
+                        return 0
+                else:
+                    attach_screen(entry)
+            elif choice.lower() == "s":
+                if new_window(mux, shell=True):
+                    return 0
+            elif choice.lower() in ("w", "n"):
+                if new_window(mux):
+                    return 0
+            elif choice.lower() == "p":
+                if resume(mux):
+                    return 0
+            elif choice.lower() == "t":
+                if mux.windows():
+                    if mux.attach():
+                        return 0
+                else:
+                    line("No tmux sessions yet; create a shell or omp window first.")
+            else:
+                line("Choose a listed number, s, t, w, n, p, or q.")
+        except KeyboardInterrupt:
+            print()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
