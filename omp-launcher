@@ -309,7 +309,8 @@ def attach_screen(screen):
 
 def omp_command(auto, session=None):
     args = ["omp", "--resume", session.id] if session else ["omp", "-c"]
-    args += ["--allow-home", "--config", str(ROOT / "omp-config.yml")]
+    args += ["--allow-home", "--config", str(ROOT / "omp-config.yml"),
+             "--extension", str(ROOT / "omp-web-composer-bridge.ts")]
     if os.environ.get("OMP_SESSION_DIR"):
         args += ["--session-dir", canonical(os.environ["OMP_SESSION_DIR"])]
     if auto:

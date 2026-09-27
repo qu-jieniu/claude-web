@@ -44,7 +44,7 @@ button:focus-visible, textarea:focus-visible {
   padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(64px, 1fr) auto auto;
   overflow: hidden;
 }
 
@@ -82,14 +82,74 @@ button:focus-visible, textarea:focus-visible {
 #terminal .xterm-viewport { overscroll-behavior: contain; }
 #terminal .xterm:focus-within { outline: 1px solid #51647b; outline-offset: 2px; }
 
-#keybar {
+#terminal-tools {
+  grid-row: 4;
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  align-items: center;
+  padding: 5px 4px;
+  border-top: 1px solid #303b49;
+}
+
+#composer-toggle { flex: none; min-height: 44px; }
+#composer-toggle[aria-expanded="true"] { background: #354d65; }
+
+#composer {
   grid-row: 3;
+  min-width: 0;
+  max-height: var(--composer-max-height, 360px);
+  padding: 8px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid #465366;
+  background: #1b222c;
+}
+
+#composer label { display: block; font-size: 14px; }
+.composer-hint { color: #b5c1d1; font-size: 12px; }
+#composer-origin, #composer-status {
+  margin: 5px 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+#composer-status { color: #c5d6ea; }
+#composer-text {
+  display: block;
+  width: 100%;
+  min-height: 64px;
+  max-height: 180px;
+  resize: none;
+  padding: 8px;
+  color: inherit;
+  background: #11151b;
+  border: 1px solid #64758b;
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 1.35;
+  user-select: text;
+  -webkit-user-select: text;
+  touch-action: auto;
+}
+.composer-actions {
+  position: sticky;
+  bottom: -8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
+  background: #1b222c;
+}
+.composer-actions button { min-width: 44px; min-height: 44px; padding: 6px 8px; }
+#composer-send { margin-left: auto; background: #294a3c; }
+
+#keybar {
+  flex: 1;
   display: none;
   min-width: 0;
   align-items: center;
   gap: 4px;
-  padding: 5px 4px;
-  border-top: 1px solid #303b49;
+  padding: 0;
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;

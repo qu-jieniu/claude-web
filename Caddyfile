@@ -8,6 +8,9 @@
 	bind {$OMP_BIND_ADDRESS}
 	header X-Content-Type-Options nosniff
 	header Cache-Control no-store
+	handle /composer/* {
+		reverse_proxy 127.0.0.1:{$OMP_COMPOSER_PORT}
+	}
 	handle /t/* {
 		reverse_proxy 127.0.0.1:{$OMP_TERMINAL_PORT}
 	}

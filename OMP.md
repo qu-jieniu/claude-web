@@ -10,6 +10,7 @@ of this branch and are not modified by its preview deployment.
 Browser: direct xterm DOM terminal
   HTTP /                     -> Caddy -> web/
   WebSocket /t/ws + /t/token  -> Caddy -> ttyd -> omp-launcher -> tmux -> omp/bash
+  HTTP /composer/*           -> Caddy -> Python -> private Unix socket -> omp extension
 Local terminal                         -> omp-launcher -> same tmux server
 ```
 
@@ -18,19 +19,20 @@ constructor, custom terminfo, or copied host binary. The frontend speaks ttyd's
 binary protocol directly. Its current stable tmux window ID supplies every
 reconnect URL. xterm and fit-addon assets are local, not fetched from a CDN.
 
-`omp-web-entry` supervises ttyd and Caddy. Unexpected exit of either stops its
-sibling and fails the appliance. SIGTERM/SIGINT stops both normally. Native runs
-bind loopback by default; the image binds all container interfaces for Podman
-port forwarding. The image is Linux x86-64.
+`omp-web-entry` supervises ttyd, Caddy and the loopback composer HTTP service.
+Unexpected exit of any child stops its siblings and fails the appliance.
+SIGTERM/SIGINT stops all three normally. Browser PTYs do not inherit a parent
+tmux client identity. Native runs bind loopback by default; the image binds all
+container interfaces for Podman forwarding. The image is Linux x86-64.
 
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-2 .
+podman build -t localhost/omp-web-rebuild:18.3.2-7 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-2
+  localhost/omp-web-rebuild:18.3.2-7
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -72,6 +74,8 @@ settings:
 | `OMP_WEB_ROOT` / `--root` | `/opt/omp-web`; absolute application root |
 | `OMP_HTTP_PORT` / `--http-port` | `8080`; complete HTTP front |
 | `OMP_TERMINAL_PORT` / `--terminal-port` | `7682`; ttyd transport |
+| `OMP_COMPOSER_PORT` / `--composer-port` | `7683`; loopback-only composer HTTP adapter |
+| `OMP_COMPOSER_DIR` | `~/.omp/run/web-composer`; private IPC directory, shared at the same absolute path with host omp |
 | `OMP_BIND_ADDRESS` / `--bind` | native `127.0.0.1`, image `0.0.0.0` |
 | `OMP_TMUX_SOCKET` | explicit socket path; unset uses normal tmux discovery |
 | `OMP_TMUX_SESSION` | `1`; session for newly created windows |
@@ -261,3 +265,56 @@ Image `18.3.2-5` prioritizes Select, Paste, Esc, Ctrl-C and Tab, followed by the
 four arrows, Ctrl-A, Ctrl-L, Detach and Ctrl-D. The visible Select label is
 shorter; its accessible label remains Select terminal text. The first five
 actions fit the measured 360px Android viewport without horizontal scrolling.
+
+### Local prompt composer
+
+Image `localhost/omp-web-rebuild:18.3.2-7` adds **Compose** on desktop and phone.
+Typing, multiline Enter, selection and IME composition happen in a native browser
+textarea, without a terminal round trip. **Send to OMP** submits plain prompt text
+through an extension API, never paste-plus-Enter. Terminal slash commands still
+belong in the terminal.
+
+The draft is pinned to its original window, pane and omp session. **Retarget**
+explicitly changes that destination; **Check** refreshes readiness. Shells,
+unbridged sessions, copy mode, busy omp, and nonempty terminal editors reject Send.
+Switching the active pane or session invalidates the old target.
+
+Only a matching omp message acknowledgement clears the draft. Hiding the panel,
+submission errors and WebSocket reconnects retain it. An uncertain result says
+to check the conversation before deliberately sending again; reconnect never
+retries a POST. Drafts live in page memory, not localStorage: reloading or closing
+the browser page discards them. The private SQLite ledger stores request hashes
+and outcomes, not prompt text, and prevents replay of the same request ID across
+adapter restarts. HTTP Origin checks are not authentication.
+
+New omp processes launched by the rebuilt launcher load
+`omp-web-composer-bridge.ts` explicitly. Existing host omp/tmux processes are
+untouched and show Send unavailable. Omp 18.3.2 cannot hot-load this extension:
+`/reload-plugins` does **not** enable it. When convenient, exit the old omp
+process and resume its saved conversation with the rebuilt launcher's **Resume**
+action, or from the same project directory:
+
+```sh
+omp -c --allow-home \
+  --extension /home/jieniu/.containers/omp-web-rebuild/omp-web-composer-bridge.ts
+```
+
+Use `--resume SESSION_ID` instead of `-c` to select an exact saved conversation.
+Do not run two processes against the same saved session simultaneously. No global
+extension configuration is changed. Existing host tmux key bindings are also
+untouched; use the rebuilt launcher rather than an old binding to enable Compose.
+
+The host-connected preview on 17688 runs the composer-enabled image. Its web
+container restart preserved all eight pre-existing host pane PIDs. The isolated
+17685 container was not restarted; its next start uses the new image.
+
+Verified in the deployed host-connected browser: a multiline prompt produced
+`DEPLOYED_COMPOSER_OK`; matching HTTP acknowledgement cleared the draft; replaying
+the accepted request did not add another message. Copy mode, a terminal draft,
+an active shell pane and a foreign Origin rejected submission. Aborting a POST
+retained the draft with an uncertain-delivery warning; closing and reopening the
+panel and disconnecting/reconnecting its real WebSocket did not resend it.
+Phone-size Chromium layout was observed; physical-phone IME behavior for this
+new composer remains unverified. The real-model smoke used the configured account:
+the first local-model attempt returned 401 and omp switched to its configured
+fallback; the deployed smoke explicitly used that account-backed model.

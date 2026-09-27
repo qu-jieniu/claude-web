@@ -18,6 +18,20 @@
       <button id="reconnect" type="button" aria-label="Reconnect to the current terminal session">Reconnect</button>
     </header>
     <div id="terminal" aria-label="Interactive terminal"></div>
+    <section id="composer" aria-label="Compose a prompt" hidden>
+      <label for="composer-text">Prompt <span class="composer-hint">· Enter adds a line</span></label>
+      <p id="composer-origin"></p>
+      <textarea id="composer-text" rows="4" placeholder="Write locally, then send to OMP" aria-describedby="composer-origin composer-status"></textarea>
+      <p id="composer-status" role="status" aria-live="polite" aria-atomic="true"></p>
+      <div class="composer-actions">
+        <button id="composer-clear" type="button" aria-label="Clear draft">Clear</button>
+        <button id="composer-target" type="button" aria-label="Retarget draft to current session">Retarget</button>
+        <button id="composer-check" type="button" aria-label="Check session readiness">Check</button>
+        <button id="composer-send" type="button" disabled>Send to OMP</button>
+      </div>
+    </section>
+    <div id="terminal-tools">
+      <button id="composer-toggle" type="button" aria-expanded="false" aria-controls="composer">Compose</button>
     <nav id="keybar" aria-label="Terminal keys">
       <button type="button" data-key="select" aria-label="Select terminal text">Select</button>
       <button type="button" data-key="paste" aria-label="Paste clipboard into the terminal">Paste</button>
@@ -33,6 +47,7 @@
       <button type="button" data-key="detach" aria-label="Detach from the multiplexer session">Detach</button>
       <button type="button" data-key="eof" aria-label="Control D, end of input">^D</button>
     </nav>
+    </div>
     <aside id="notice" role="status" aria-live="polite" aria-atomic="true" hidden>
       <span id="notice-text"></span>
       <button id="dismiss-notice" type="button" aria-label="Dismiss notice">Dismiss</button>

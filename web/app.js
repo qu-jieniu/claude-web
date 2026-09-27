@@ -12,6 +12,15 @@
   const pasteDialog = document.getElementById('paste-dialog');
   const pasteText = document.getElementById('paste-text');
   const sendPaste = document.getElementById('send-paste');
+  const composer = document.getElementById('composer');
+  const composerToggle = document.getElementById('composer-toggle');
+  const composerText = document.getElementById('composer-text');
+  const composerOrigin = document.getElementById('composer-origin');
+  const composerStatus = document.getElementById('composer-status');
+  const composerSend = document.getElementById('composer-send');
+  const composerClear = document.getElementById('composer-clear');
+  const composerTarget = document.getElementById('composer-target');
+  const composerCheck = document.getElementById('composer-check');
 
   if (!window.Terminal || !window.FitAddon) {
     connection.textContent = 'Terminal assets could not load. Reload this page to try again.';
@@ -48,6 +57,14 @@
   let leaving = false;
   let prefixArmed = false;
   let fitFrame = null;
+  let draftTarget = null;
+  let composerAvailable = false;
+  let composerChecking = false;
+  let composerSending = false;
+  let composerComposing = false;
+  let composerMessage = '';
+  let composerAmbiguous = false;
+  let composerCheckVersion = 0;
   const HIGH_WATER = 256 * 1024;
   const LOW_WATER = 64 * 1024;
   const MAX_PENDING = 8 * 1024 * 1024;
@@ -63,7 +80,9 @@
   });
 
   function focusTerminal() {
-    if (!document.querySelector('dialog[open]')) term.textarea.focus({ preventScroll: true });
+    if (!document.querySelector('dialog[open]') && !composer.contains(document.activeElement)) {
+      term.textarea.focus({ preventScroll: true });
+    }
   }
 
   function setPrefix(armed) {
@@ -85,6 +104,11 @@
     }
     sendPaste.disabled = !connected;
     if (!connected) setPrefix(false);
+    composerAvailable = false;
+    composerCheckVersion++;
+    composerChecking = false;
+    renderComposer();
+    if (connected && !composer.hidden && !composerSending) checkComposerTarget();
   }
 
   // Layout width deliberately comes from the layout viewport, not visualViewport:
@@ -98,6 +122,7 @@
       const height = viewport ? Math.min(layoutHeight, viewport.height * viewport.scale) : layoutHeight;
       app.style.height = `${Math.max(1, Math.floor(height))}px`;
       app.style.top = `${viewport && viewport.scale <= 1.01 ? viewport.offsetTop : 0}px`;
+      app.style.setProperty('--composer-max-height', `${Math.max(48, Math.min(360, height * .6, height - 150))}px`);
       if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
     });
   }
@@ -110,11 +135,18 @@
   scheduleFit();
 
   function replaceArg(arg) {
+    const changed = currentArg !== arg;
     currentArg = arg;
     const url = new URL(location.href);
     if (arg === null) url.searchParams.delete('arg');
     else url.searchParams.set('arg', arg);
     if (url.href !== location.href) history.replaceState(history.state, '', url);
+    if (changed) {
+      composerAvailable = false;
+      composerCheckVersion++;
+      composerChecking = false;
+      renderComposer();
+    }
   }
 
   function receiveTitle(raw, frame = false) {
@@ -151,6 +183,7 @@
 
   function sendInput(data) {
     const ctx = active;
+    if (composer.contains(document.activeElement)) return false;
     if (!ctx?.ready || ctx.socket.readyState !== WebSocket.OPEN || leaving) return false;
     const bytes = typeof data === 'string' ? encoder.encode(data) : data;
     const packet = new Uint8Array(bytes.length + 1);
@@ -308,7 +341,7 @@
   reconnect.addEventListener('click', () => { retryCount = 0; connect(); });
   window.addEventListener('online', () => { if (!active?.ready && !leaving) connect(); });
   window.addEventListener('popstate', () => {
-    currentArg = new URL(location.href).searchParams.get('arg');
+    replaceArg(new URL(location.href).searchParams.get('arg'));
     retryCount = 0;
     connect(true);
   });
@@ -319,8 +352,198 @@
   window.addEventListener('pageshow', event => {
     if (!event.persisted) return;
     leaving = false;
-    currentArg = new URL(location.href).searchParams.get('arg');
+    replaceArg(new URL(location.href).searchParams.get('arg'));
     connect();
+  });
+
+  function composerConnected() {
+    return active?.ready && active.socket?.readyState === WebSocket.OPEN && !leaving;
+  }
+
+  function renderComposer() {
+    const connected = composerConnected();
+    const sameWindow = draftTarget?.windowId === currentArg;
+    const session = draftTarget?.sessionId;
+    composerOrigin.textContent = draftTarget
+      ? `Draft target: ${draftTarget.windowId || 'launcher'}${session ? ` · ${session}` : ''}`
+      : 'No draft target selected.';
+    let status = composerMessage;
+    if (composerSending) status = 'Sending to the pinned OMP session…';
+    else if (!connected) status = 'Disconnected. Your local draft is kept; reconnect before sending.';
+    else if (draftTarget && !sameWindow) {
+      status = 'The terminal window changed. Return to the draft target, or choose Retarget to move this draft to the current session.';
+    } else if (composerChecking) status = 'Checking the OMP session…';
+    if (composerAmbiguous) {
+      status = `The previous send may have been submitted. Check OMP before sending again. ${status}`;
+    }
+    composerStatus.textContent = status;
+    composerSend.disabled = !connected || !sameWindow || !composerAvailable ||
+      composerChecking || composerSending || composerComposing || !composerText.value.trim();
+    composerSend.textContent = composerAmbiguous ? 'Send again' : 'Send to OMP';
+    composerText.readOnly = composerSending;
+    composerClear.disabled = composerSending || composerComposing;
+    composerTarget.disabled = composerSending || composerChecking || composerComposing || !connected;
+    composerCheck.disabled = composerSending || composerChecking || !connected || !sameWindow;
+  }
+
+  function pinComposerTarget() {
+    draftTarget = { windowId: currentArg, paneId: null, sessionId: null };
+    composerAvailable = false;
+    composerCheckVersion++;
+    composerChecking = false;
+    composerMessage = '';
+    renderComposer();
+  }
+
+  async function checkComposerTarget() {
+    if (!draftTarget || !composerConnected() || draftTarget.windowId !== currentArg) {
+      renderComposer();
+      return false;
+    }
+    if (!/^tmux-\d+$/.test(draftTarget.windowId || '')) {
+      composerAvailable = false;
+      composerMessage = 'Select an OMP tmux session, then choose Retarget.';
+      renderComposer();
+      return false;
+    }
+    const version = ++composerCheckVersion;
+    const target = draftTarget;
+    const ctx = active;
+    composerChecking = true;
+    composerAvailable = false;
+    renderComposer();
+    const abort = new AbortController();
+    const timeout = setTimeout(() => abort.abort(), 10000);
+    try {
+      const response = await fetch(`/composer/target?window=${encodeURIComponent(target.windowId)}`, {
+        credentials: 'same-origin', cache: 'no-store', signal: abort.signal,
+      });
+      const result = await response.json();
+      if (version !== composerCheckVersion || target !== draftTarget || ctx !== active ||
+          !composerConnected() || target.windowId !== currentArg) return false;
+      if (!response.ok || !result.available || !result.paneId || !result.sessionId) {
+        composerMessage = result.error || result.reason || 'No available OMP session. Check session when it is ready.';
+        return false;
+      }
+      if (target.sessionId && (target.sessionId !== result.sessionId || target.paneId !== result.paneId)) {
+        composerMessage = 'The OMP session or pane changed. Choose Retarget to explicitly move this draft to the current session.';
+        return false;
+      }
+      target.paneId = result.paneId;
+      target.sessionId = result.sessionId;
+      composerAvailable = true;
+      composerMessage = 'Ready. Send submits this prompt directly to OMP, not to the terminal.';
+      return true;
+    } catch {
+      if (version === composerCheckVersion) {
+        composerMessage = 'Could not check the OMP session. Your draft is kept. Choose Check to try again.';
+      }
+      return false;
+    } finally {
+      clearTimeout(timeout);
+      if (version === composerCheckVersion) {
+        composerChecking = false;
+        renderComposer();
+      }
+    }
+  }
+
+  composerToggle.addEventListener('click', () => {
+    composer.hidden = !composer.hidden;
+    composerToggle.setAttribute('aria-expanded', String(!composer.hidden));
+    composerToggle.textContent = composer.hidden ? 'Compose' : 'Hide compose';
+    if (!composer.hidden) {
+      setPrefix(false);
+      if (!draftTarget) pinComposerTarget();
+      if (!composerSending) checkComposerTarget();
+      composerText.focus({ preventScroll: true });
+    } else {
+      composerToggle.focus({ preventScroll: true });
+    }
+    scheduleFit();
+  });
+  composerText.addEventListener('input', () => {
+    if (!draftTarget) {
+      pinComposerTarget();
+      checkComposerTarget();
+    }
+    composerText.style.height = '0px';
+    composerText.style.height = `${Math.min(180, composerText.scrollHeight)}px`;
+    renderComposer();
+    scheduleFit();
+  });
+  composerText.addEventListener('compositionstart', () => {
+    composerComposing = true;
+    renderComposer();
+  });
+  composerText.addEventListener('compositionend', () => {
+    composerComposing = false;
+    renderComposer();
+  });
+  composerClear.addEventListener('click', () => {
+    if (composerSending || composerComposing) return;
+    composerText.value = '';
+    composerText.style.height = '';
+    composerAmbiguous = false;
+    pinComposerTarget();
+    checkComposerTarget();
+    composerText.focus({ preventScroll: true });
+    scheduleFit();
+  });
+  composerTarget.addEventListener('click', () => {
+    if (composerSending || composerComposing) return;
+    pinComposerTarget();
+    checkComposerTarget();
+  });
+  composerCheck.addEventListener('click', () => checkComposerTarget());
+  composerSend.addEventListener('click', async () => {
+    if (composerSend.disabled || composerSending || composerComposing) return;
+    composerSending = true;
+    const text = composerText.value;
+    const target = draftTarget;
+    const ctx = active;
+    let posted = false;
+    let timeout;
+    renderComposer();
+    try {
+      if (!await checkComposerTarget() || target !== draftTarget || ctx !== active ||
+          !composerConnected() || target.windowId !== currentArg) return;
+      const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+        byte => byte.toString(16).padStart(2, '0')).join('');
+      const abort = new AbortController();
+      timeout = setTimeout(() => abort.abort(), 30000);
+      posted = true;
+      const response = await fetch('/composer/send', {
+        method: 'POST', credentials: 'same-origin', signal: abort.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...target, requestId, text }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        composerAvailable = false;
+        composerAmbiguous ||= result.ambiguous === true;
+        composerMessage = result.error || 'OMP rejected the prompt. Check session before sending again.';
+        return;
+      }
+      if (result.accepted !== true || result.requestId !== requestId) throw new Error('Unconfirmed submission');
+      composerText.value = '';
+      composerText.style.height = '';
+      composerAmbiguous = false;
+      draftTarget = null;
+      composerAvailable = false;
+      composerMessage = 'Prompt accepted by OMP. Start typing to compose another prompt.';
+    } catch {
+      composerAvailable = false;
+      composerAmbiguous ||= posted;
+      composerMessage = posted
+        ? 'Draft kept. No automatic retry will be made.'
+        : 'Could not prepare the send. Draft kept; check session before trying again.';
+    } finally {
+      clearTimeout(timeout);
+      composerSending = false;
+      renderComposer();
+      scheduleFit();
+    }
   });
 
   function openPasteDialog() {

@@ -14,19 +14,24 @@ def main():
     parser.add_argument('--root', default=os.environ.get('OMP_WEB_ROOT', '/opt/omp-web'))
     parser.add_argument('--http-port', type=int, default=os.environ.get('OMP_HTTP_PORT', '8080'))
     parser.add_argument('--terminal-port', type=int, default=os.environ.get('OMP_TERMINAL_PORT', '7682'))
+    parser.add_argument('--composer-port', type=int, default=os.environ.get('OMP_COMPOSER_PORT', '7683'))
     parser.add_argument('--bind', choices=('127.0.0.1', '0.0.0.0'),
                         default=os.environ.get('OMP_BIND_ADDRESS', '127.0.0.1'))
     args = parser.parse_args()
-    for port in (args.http_port, args.terminal_port):
+    for port in (args.http_port, args.terminal_port, args.composer_port):
         if not 1 <= port <= 65535:
             parser.error('ports must be between 1 and 65535')
     root = Path(args.root).resolve()
     if not (root / 'web/vendor/xterm.js').is_file():
         parser.error('browser assets missing; run npm ci && npm run build in the application root')
+    # Browser PTYs are independent clients, even when this service starts in tmux.
+    os.environ.pop('TMUX', None)
+    os.environ.pop('TMUX_PANE', None)
     os.environ.update({
         'OMP_WEB_ROOT': str(root),
         'OMP_HTTP_PORT': str(args.http_port),
         'OMP_TERMINAL_PORT': str(args.terminal_port),
+        'OMP_COMPOSER_PORT': str(args.composer_port),
         'OMP_BIND_ADDRESS': args.bind,
         'LANG': 'C.UTF-8',
         'LC_ALL': 'C.UTF-8',
@@ -43,6 +48,9 @@ def main():
     children = []
     result = 0
     try:
+        children.append(subprocess.Popen([
+            sys.executable, str(root / 'omp-web-composer'), '--port', str(args.composer_port),
+        ], start_new_session=True))
         children.append(subprocess.Popen([
             'ttyd', '-i', args.bind, '-p', str(args.terminal_port),
             '-W', '-O', '-a', '-b', '/t', '-T', 'xterm-256color',
