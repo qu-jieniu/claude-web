@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# omp-jsonl-view — open the active omp session's JSONL in a pager.
+#
+# Two resolution paths:
+#   omp-jsonl-view            — screen: resolves via $STY and
+#                               `omp-status --jsonl $STY-suffix` (the screenrc
+#                               Ctrl-A j binding inside omp-* screens).
+#   omp-jsonl-view --popup    — tmux: resolves the JSONL from the popup's
+#                               start directory (the binding passes
+#                               -d '#{pane_current_path}'); wired to the
+#                               tmux prefix+j popup binding.
+#
+# `q` exits less; `/` searches. The pretty-printer dumps existing content
+# and exits at EOF, so less shows (END) at the bottom and behaves like a
+# normal pager. +G jumps to the end on open so the most-recent turn is
+# visible; user scrolls up for older content. To see new turns appended
+# after opening, close (q) and re-press the binding.
+set -e
+
+# Prefer the live-editable home copy; fall back to the baked appliance copy.
+WEB_DIR="$HOME/.containers/omp-web"
+[ -x "$WEB_DIR/omp-status" ] || WEB_DIR=/opt/omp-web
+
+if [ "${1:-}" = "--popup" ]; then
+    # tmux popup mode: the binding starts the popup in the pane's cwd
+    # (display-popup -d '#{pane_current_path}'), so the transcript is the
+    # newest JSONL for $PWD's sessions dir.
+    jsonl=$("$WEB_DIR/omp-status" --jsonl-cwd "$(pwd)" 2>/dev/null) || true
+    if [ -z "$jsonl" ] || [ ! -f "$jsonl" ]; then
+        printf 'no JSONL found for %s\n' "$(pwd)" >&2
+        printf '(plain shells and freshly-started sessions have nothing to view)\n' >&2
+        read -n1 -s -r -p '[any key to close]'
+        exit 1
+    fi
+elif [ -n "${1:-}" ]; then
+    jsonl=$("$WEB_DIR/omp-status" --jsonl-cwd "$1" 2>/dev/null) || true
+    if [ -z "$jsonl" ] || [ ! -f "$jsonl" ]; then
+        printf 'no JSONL found for %s\n' "$1" >&2
+        printf '(plain shells and freshly-started sessions have nothing to view)\n' >&2
+        read -n1 -s -r -p '[any key to close]'
+        exit 1
+    fi
+else
+    sname="${STY##*.}"
+    if [ -z "$sname" ]; then
+        printf 'error: no cwd argument and not inside a screen session (STY unset)\n' >&2
+        read -n1 -s -r -p '[any key to close]'
+        exit 1
+    fi
+    jsonl=$("$WEB_DIR/omp-status" --jsonl "$sname" 2>/dev/null) || true
+    if [ -z "$jsonl" ] || [ ! -f "$jsonl" ]; then
+        printf 'no JSONL found for screen %s\n' "$sname" >&2
+        printf '(plain shells and freshly-started sessions have nothing to view)\n' >&2
+        read -n1 -s -r -p '[any key to close]'
+        exit 1
+    fi
+fi
+
+"$WEB_DIR/omp-jsonl-pretty" "$jsonl" | less -R +G

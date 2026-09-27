@@ -2,25 +2,239 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<!-- interactive-widget=resizes-content: Android shrinks the layout viewport
+     when the soft keyboard opens, so the inner ttyd refits. iOS ignores it;
+     the visualViewport handler below covers Safari. viewport-fit=cover +
+     safe-area padding keep the key bar off the notch/home indicator. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <link rel="icon" type="image/png" href="/favicon.png">
-<title>Claude</title>
+<title>omp</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; }
+  html, body { margin: 0; height: 100%; background: #000; overscroll-behavior: none; }
   iframe { border: 0; width: 100%; height: 100%; display: block; }
+  /* Mobile key bar: coarse pointers only (phones/tablets). Desktop never
+     sees it; every key it sends exists on a real keyboard anyway. */
+  #keys {
+    display: none; flex: 0 0 auto; gap: 4px; padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+    padding-left: max(6px, env(safe-area-inset-left)); padding-right: max(6px, env(safe-area-inset-right));
+    background: #111; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch;
+  }
+  @media (pointer: coarse) { #keys { display: flex; } body { display: flex; flex-direction: column; } iframe { height: auto; flex: 1 1 auto; min-height: 0; } }
+  #keys button {
+    flex: 0 0 auto; min-width: 44px; min-height: 40px; border-radius: 8px;
+    background: #222; color: #ccc; border: 1px solid #333;
+    font: 15px system-ui, sans-serif; padding: 4px 10px; user-select: none; touch-action: manipulation;
+  }
+  #keys button:active { background: #3a7a3a; color: #fff; }
+  #keys button.armed { background: #234d23; color: #e0ffe0; border-color: #3a7a3a; }
 </style>
 </head>
 <body>
 <iframe id="t" allow="clipboard-read; clipboard-write"></iframe>
+<div id="keys">
+  <button data-k="esc">Esc</button>
+  <button data-k="tab">Tab</button>
+  <button data-k="up">↑</button>
+  <button data-k="down">↓</button>
+  <button data-k="left">←</button>
+  <button data-k="right">→</button>
+  <button data-k="cc">^C</button>
+  <button data-k="cd">^D</button>
+  <button data-k="cl">^L</button>
+  <button data-k="prefix" id="btnPrefix">⌃A</button>
+  <button data-k="detach">Detach</button>
+  <button data-k="paste">Paste</button>
+</div>
 <script>
 (function () {
   var f = document.getElementById('t');
 
   // Carry any ?arg=<session> from our URL into the ttyd iframe so ttyd (-a)
-  // forwards it to the launcher for direct-attach.
+  // forwards it to the launcher for direct-attach. rendererType=dom forces the
+  // DOM renderer: the WebGL default has no per-glyph font fallback, so rare
+  // glyphs (⟦⟧, ⌦, …) render as underscore boxes on devices whose mono font
+  // lacks them. The DOM renderer lets the browser fall back per glyph.
   var arg = new URLSearchParams(location.search).get('arg');
-  f.src = '/t/' + (arg ? '?arg=' + encodeURIComponent(arg) : '');
+  f.src = '/t/?rendererType=dom' + (arg ? '&arg=' + encodeURIComponent(arg) : '');
   f.addEventListener('load', function () { try { f.contentWindow.focus(); } catch (e) {} });
+
+  function term() {
+    try { return f.contentWindow && f.contentWindow.term; } catch (e) { return null; }
+  }
+
+  // Scroll pinning: after a resize (browser zoom, orientation) xterm's refit
+  // can strand the viewport away from the live bottom — pin it back, BUT only
+  // if it was at the bottom before the resize. Never yank a reader.
+  var wasAtBottom = true;
+  function probeBottom() {
+    var t = term();
+    if (t) { var b = t.buffer.active; wasAtBottom = (b.viewportY === b.baseY); }
+  }
+  function pin() {
+    var t = term();
+    if (t && wasAtBottom && t.scrollToBottom) t.scrollToBottom();
+  }
+  window.addEventListener('resize', function () { probeBottom(); setTimeout(pin, 60); setTimeout(pin, 350); });
+
+  // Resize freeze: tmux re-anchors copy-mode to the bottom on ANY pane resize
+  // (verified: pos N → 0 even for height-only changes; no tmux option to keep
+  // it). While the user is READING (mouse tracking on, frozen transcript view
+  // — no composer visible), pin the iframe to its current pixel size: the pty
+  // then never resizes and the reading position survives untouched. Live
+  // view / menu / keyboard-open (typing intent) unfreeze and let the refit
+  // run — the tick below re-checks every 700ms.
+  var frozen = false;
+  function isLiveView() {
+    var t = term(); if (!t) return true;
+    var buf = t.buffer.active;
+    for (var r = buf.baseY + t.rows - 3; r < buf.baseY + t.rows; r++) {
+      if (buf.getLine(r).translateToString(false).indexOf('╰─') >= 0) return true;
+    }
+    return false;
+  }
+  function freezeCheck() {
+    var t = term(); if (!t) return;
+    var mode = t.modes && t.modes.mouseTrackingMode;
+    var vv = window.visualViewport;
+    var keyboard = !!(vv && vv.height < window.innerHeight - 40);
+    var live = isLiveView();
+    if (frozen && (live || mode === 'none' || keyboard)) {
+      frozen = false;
+      f.style.width = ''; f.style.height = ''; f.style.flex = '';
+    }
+    if (!frozen && mode !== 'none' && !live && !keyboard) {
+      frozen = true;
+      var r = f.getBoundingClientRect();
+      f.style.width = Math.round(r.width) + 'px';
+      f.style.height = Math.round(r.height) + 'px';
+      f.style.flex = '0 0 auto';
+    }
+  }
+  window.addEventListener('resize', function () { freezeCheck(); probeBottom(); setTimeout(pin, 60); setTimeout(pin, 350); });
+  window.addEventListener('wheel', function () { freezeCheck(); }, true);
+
+  // Soft keyboard: iOS shrinks the visual viewport without firing a window
+  // resize, so the inner ttyd never refits. Resize the iframe ELEMENT to the
+  // visible height instead — the iframe's own window then resizes and ttyd's
+  // fit loop runs. Android gets the same via interactive-widget=resizes-content.
+  // flex:'0 0 auto' is required while keyboard-open: the coarse-pointer flex
+  // layout would otherwise grow the iframe back to the layout viewport height.
+  if (window.visualViewport) {
+    var vv = window.visualViewport;
+    var vvFit = function () {
+      var h = Math.round(vv.height);
+      if (h < window.innerHeight - 40) {           // keyboard open — typing wins
+        frozen = false;
+        var bar = document.getElementById('keys');
+        var barH = (bar && bar.offsetHeight) || 0;  // incl. safe-area padding
+        f.style.width = '';
+        f.style.flex = '0 0 auto';
+        f.style.height = Math.max(120, h - barH) + 'px';
+      } else if (!frozen) {                         // closed, not reading
+        f.style.width = ''; f.style.flex = ''; f.style.height = '';
+      }
+      // closed while frozen: freezeCheck owns the styles — don't clobber
+    };
+    vv.addEventListener('resize', vvFit);
+    vv.addEventListener('scroll', function () { window.scrollTo(0, 0); });
+  }
+
+  // Touch bridge: swipes must reach tmux copy-mode. With mouse tracking on,
+  // xterm.js neither scroll-scrolls on touch nor synthesizes wheel events, so
+  // a phone cannot read history at all. Translate vertical swipes into real
+  // WheelEvents on the term element — the exact path a desktop wheel uses
+  // (xterm → SGR → tmux copy-mode / alternate-screen apps). One wheel event
+  // scrolls one tmux line (conf sends -N1), so emit per-cell-height chunks.
+  function initTouch() {
+    var t = term();
+    if (!t || !t.element) return;
+    var el = t.element;
+    if (el.dataset.touchBridge) { return; }
+    el.dataset.touchBridge = '1';
+    el.style.touchAction = 'none';
+    var touchId = null, lastY = null;
+    function endTouch(e) {
+      if (!e) { touchId = null; lastY = null; return; }
+      for (var i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === touchId) { touchId = null; lastY = null; }
+      }
+    }
+    el.addEventListener('touchstart', function (e) {
+      if (touchId === null) {
+        touchId = e.changedTouches[0].identifier;
+        lastY = e.changedTouches[0].clientY;
+      }
+    }, { passive: true });
+    el.addEventListener('touchmove', function (e) {
+      if (touchId === null) return;
+      var touch = null;
+      for (var i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === touchId) touch = e.changedTouches[i];
+      }
+      if (!touch) return;
+      // Mouse tracking off (launcher menu, plain shells): xterm scrolls its
+      // own buffer natively on touch — synthesizing wheels would double-scroll
+      // or leak arrow keys. Bridge only when an app requested mouse tracking.
+      if (t.modes && t.modes.mouseTrackingMode === 'none') return;
+      if (e.touches.length !== 1) { lastY = touch.clientY; return; }  // multitouch: resync, never scroll
+      var y = touch.clientY;
+      var dy = lastY - y;                       // finger up = dy>0 = wheel down
+      if (Math.abs(dy) < 8) return;
+      var rect = el.getBoundingClientRect();
+      var cellH = rect.height / t.rows || 16;
+      var lines = Math.trunc(dy / cellH);
+      if (!lines) return;
+      lastY = y;
+      var delta = lines > 0 ? 120 : -120;
+      // xterm's wheel handler lives on its .xterm-viewport child — dispatch
+      // there; textarea/element events bubble around it and are ignored.
+      var target = (t.element.querySelector('.xterm-viewport') || t.textarea || el);
+      for (var i = 0; i < Math.abs(lines); i++) {
+        target.dispatchEvent(new WheelEvent('wheel', {
+          deltaY: delta, clientX: touch.clientX, clientY: touch.clientY,
+          bubbles: true, cancelable: true
+        }));
+      }
+      e.preventDefault();
+    }, { passive: false });
+    el.addEventListener('touchend', endTouch, { passive: true });
+    el.addEventListener('touchcancel', endTouch, { passive: true });
+    // ⌃A armed + a keyboard letter → tmux prefix command. Best effort: some
+    // Android IMEs never produce real keydown events; toolbar keys always work.
+    el.addEventListener('keydown', function (e) {
+      if (!pendingPrefix || e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault(); e.stopPropagation();
+      var t2 = term();
+      if (t2 && t2.input) t2.input('\x01' + e.key);
+      armPrefix(false);
+    }, true);
+    // OSC52 → browser clipboard: ttyd 1.7.7's xterm 5.4 registers no OSC52
+    // handler, so tmux copy-selection (set-clipboard on) never reached the
+    // browser. Bridge it here. Callback data is "Pc;base64" (no "52;" prefix;
+    // Pc may hold selection chars; '?' means a clipboard QUERY — never read
+    // clipboard for those). Decode bytes as UTF-8; return true synchronously
+    // and catch writeText rejections so a denied permission can't stall the
+    // terminal parser.
+    if (t.parser && t.parser.registerOscHandler && !t._osc52hooked) {
+      t._osc52hooked = true;
+      t.parser.registerOscHandler(52, function (data) {
+        try {
+          var semi = data.indexOf(';');
+          var sel = semi >= 0 ? data.slice(0, semi) : '';
+          if (sel.indexOf('?') >= 0) return true;
+          var b64 = semi >= 0 ? data.slice(semi + 1) : data;
+          if (!b64) return true;
+          var bin = atob(b64.replace(/[^A-Za-z0-9+/=]/g, ''));
+          var bytes = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          var text = new TextDecoder().decode(bytes);
+          var w = f.contentWindow.navigator.clipboard || navigator.clipboard;
+          if (w && w.writeText) w.writeText(text).catch(function () {});
+        } catch (e) {}
+        return true;
+      });
+    }
+  }
 
   // Reflect the active session into two places (replaceState, never a reload):
   //   1. the top window's URL — drives tab-reopen / browser-restore via ?arg=.
@@ -43,25 +257,86 @@
     } catch (e) {}
   }
 
-  // The launcher sets the terminal title via OSC: "claude-<session>" inside a
-  // session, "claude-launcher" at the menu. ttyd reflects that into the iframe's
+  // The launcher sets the terminal title via OSC: "omp-<session>" inside a
+  // session, "omp-launcher" at the menu. ttyd reflects that into the iframe's
   // document.title but appends its own base title, so the value is actually
-  // "claude-<session> | <base>". We parse only the leading claude-<suffix> token
+  // "omp-<session> | <base>". We parse only the leading omp-<suffix> token
   // (suffix is sanitized to [A-Za-z0-9_-], so it stops cleanly before " | ").
-  // Titles that don't start with claude- (ttyd's default / transient init) are
+  // Titles that don't start with omp- (ttyd's default / transient init) are
   // left alone so they can't wipe a valid arg before attach completes.
   var last = null;
   setInterval(function () {
+    // initTouch before the title-diff guard: a reload into the SAME session
+    // (identical title) must still arm handlers on the fresh terminal.
+    initTouch();
+    freezeCheck();
     var t;
     try { t = f.contentDocument && f.contentDocument.title; } catch (e) { return; }
     if (!t || t === last) return;
     last = t;
-    var m = /^claude-([A-Za-z0-9_-]+)/.exec(t);
+    initTouch();
+    // tmux (set-titles on) publishes "#S:#{window_id}:#{W}" titles on window
+    // switches (e.g. "1:@3:trader-go"). Sync ?arg= to the CURRENT window so a
+    // tab reload reattaches it. Deliberately NO scrollToBottom here — yanking
+    // the viewport on switch is what made reading scrollback impossible;
+    // copy-mode position survives switches on its own. Session names are
+    // arbitrary — match everything up to the :@id: separator.
+    var tm = /^[^:]+:@(\d+):/.exec(t);
+    if (tm) { setArg('tmux-' + tm[1]); return; }
+    var m = /^omp-([A-Za-z0-9_-]+)/.exec(t);
     if (!m) return;
     var s = m[1];
-    if (s === 'launcher') { setArg(null); document.title = 'Claude'; }
-    else { setArg(s); document.title = 'claude-' + s; }
+    if (s === 'launcher') { setArg(null); document.title = 'omp'; }
+    else { setArg(s); document.title = 'omp-' + s; }
   }, 700);
+
+  // Mobile key bar — inject the keys soft keyboards don't have. Sent through
+  // xterm's own input() so the pty sees real keystrokes. Arrow keys honor
+  // applicationCursorKeysMode (DECCKM): ESC O x when set, ESC [ x otherwise.
+  var pendingPrefix = false;   // ⌃A armed: next key goes through the tmux prefix
+  function armPrefix(on) {
+    pendingPrefix = on;
+    var b = document.getElementById('btnPrefix');
+    if (b) b.classList.toggle('armed', on);
+  }
+  function sendKey(data) {
+    var t = term();
+    if (!t) return;
+    if (pendingPrefix) { data = '\x01' + data; armPrefix(false); }
+    if (t.input) t.input(data);
+    try { f.contentWindow.focus(); } catch (e) {}
+  }
+  var KEYMAP = {
+    esc: '\x1b', tab: '\t', cc: '\x03', cd: '\x04', cl: '\x0c'
+  };
+  var ARROWS = { up: 'A', down: 'B', right: 'C', left: 'D' };
+  document.getElementById('keys').addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    var k = b.dataset.k;
+    if (k === 'prefix') { armPrefix(!pendingPrefix); return; }
+    if (k === 'detach') { armPrefix(false); sendKey('\x01d'); return; }
+    if (k === 'paste') {
+      armPrefix(false);
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        navigator.clipboard.readText().then(function (text) {
+          if (!text) return;
+          var t3 = term();
+          // term.paste() applies bracketed-paste mode when the app enabled it
+          // and normalizes newlines — raw \x1b[200~ wrappers corrupt input in
+          // apps without paste mode (launcher menu) and skip normalization.
+          if (t3 && t3.paste) t3.paste(text); else sendKey(text);
+        }).catch(function () {});
+      }
+      return;
+    }
+    if (KEYMAP[k]) { sendKey(KEYMAP[k]); return; }
+    if (ARROWS[k]) {
+      var t = term();
+      var pre = (t && t.modes && t.modes.applicationCursorKeysMode) ? '\x1bO' : '\x1b[';
+      sendKey(pre + ARROWS[k]);
+    }
+  });
 })();
 </script>
 </body>

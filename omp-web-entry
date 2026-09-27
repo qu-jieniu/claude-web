@@ -1,0 +1,50 @@
+#!/bin/bash
+# omp-web-entry — appliance entrypoint.
+# 1. Generates the front Caddyfile: :8080 → /t/* to local ttyd, / to wrapper.
+#    Webroot prefers the mounted home's wrapper (stays in sync on the homelab),
+#    falls back to the baked copy on fresh machines.
+# 2. Starts Caddy in the background and execs ttyd (the critical path is the
+#    main process — if ttyd dies, the container restarts).
+set -euo pipefail
+
+WEBROOT=/opt/omp-web/web
+[ -f "$HOME/.containers/omp-web/web/index.html" ] && WEBROOT="$HOME/.containers/omp-web/web"
+
+cat > /tmp/omp-web-front.caddy <<EOF
+:8080 {
+	handle /t/* {
+		reverse_proxy 127.0.0.1:7682
+	}
+	handle {
+		root * ${WEBROOT}
+		file_server
+	}
+}
+EOF
+
+caddy run --config /tmp/omp-web-front.caddy --adapter caddyfile &
+
+# `host` — interactive shell on the HOST via the mounted user systemd bus
+# (DBUS_SESSION_BUS_ADDRESS=/run/user/1000/bus). ssh-free escape hatch from
+# any container shell: the pty is allocated by the host's systemd user
+# manager, so it behaves like an ssh session (same $HOME, tmux, podman).
+printf '%s\n' \
+  '#!/bin/sh' \
+  'echo "[host shell via systemd bridge — exit to return to the container]"' \
+  'exec systemd-run --user --quiet --pty -- bash -l' \
+  > /usr/local/bin/host
+chmod +x /usr/local/bin/host
+
+# UTF-8 locale for everything under ttyd: tmux decides per-client whether the
+# outer terminal does UTF-8 from the attaching client's environment. With the
+# container default (POSIX) tmux marks the web client non-UTF8 and rewrites
+# the inner apps' unicode box-drawing to ACS garbage on output.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+# 0.0.0.0 inside the container: pasta delivers published ports to the
+# container's eth0, not loopback. Host exposure stays on 127.0.0.1
+# via PublishPort; Caddy terminates TLS in front.
+exec /usr/bin/ttyd -p 7682 -i 0.0.0.0 -W -a -b /t -T ttyd-256color \
+    -t fontSize=14 -t disableLeaveAlert=true \
+    -t rendererType=dom \
+    /usr/local/bin/omp-web-launch

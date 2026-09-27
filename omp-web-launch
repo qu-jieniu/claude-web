@@ -1,0 +1,10 @@
+#!/bin/bash
+# omp-web-launch — ttyd's launcher entry with a baked fallback.
+# Prefers the live-editable launcher in the mounted home (homelab);
+# falls back to the baked copy on fresh machines without one.
+set -euo pipefail
+
+if [ -x "${HOME}/.local/bin/omp-launcher" ]; then
+    exec "${HOME}/.local/bin/omp-launcher" "$@"
+fi
+exec /opt/omp-web/omp-launcher "$@"
