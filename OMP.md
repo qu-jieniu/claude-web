@@ -210,3 +210,38 @@ the secure-context Clipboard API; the native copy menu remains the fallback.
 Verified on the physical Android device: long-press selected `persistent`, and
 both partial-selection and Select-all copy commands reported success.
 Image `localhost/omp-web-rebuild:18.3.2-3` includes this update.
+
+### Host-connected preview
+
+`omp-web-rebuild-host-preview.service` runs the host-connected preview at
+`http://100.73.84.116:17688/`, published on all IPv4 interfaces at the user's
+request. This grants unauthenticated host-user access to anyone who can reach
+the port. The isolated preview on 17685 remains alive with its own home volume;
+its running omp/shell processes were not stopped for this integration.
+
+The host home is mounted at `/home/jieniu`, including the existing auth database,
+config, extensions, projects and saved sessions. Credentials are shared in place,
+not copied or logged. The tmux socket directory maps `/tmp/tmux-1000` to
+`/tmp/tmux-0`; the launcher explicitly uses `/tmp/tmux-0/default`.
+Both client and server are tmux 3.5a. New shell/omp windows therefore run on the
+host, using the host's omp and configuration. The new launcher's per-run terminal
+overlay still applies to newly launched omp processes. Existing panes and host
+tmux configuration are untouched. User-systemd and bus mounts enable the
+existing host-bridge integration.
+
+`OMP_WEB_ROOT` points to this shared worktree, so the host and container resolve
+the same launcher, overlay, frontend and viewer. Run `npm ci && npm run build`
+when recreating the worktree: its generated `web/vendor/` must exist.
+
+`deploy/omp-web-rebuild-host.container` records the host-specific deployment.
+The current service is transient; to make it persistent, stop
+`omp-web-rebuild-host-preview`, install that quadlet in
+`~/.config/containers/systemd/`, daemon-reload, and start `omp-web-rebuild-host`.
+Do not start both on the same port. Adapt paths and UID before using another host.
+
+Verified: browser picker lists the existing host session; a new browser-created
+shell ran as host UID 1000 outside the container; systemd bridge also returned
+UID 1000; mounted config/auth files had identical host/container inode numbers;
+eight auth records were visible without reading credential values. The eight
+pre-existing pane PIDs remained unchanged. Only the temporary verification
+shell window was removed. No provider API request was made.

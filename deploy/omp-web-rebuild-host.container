@@ -1,0 +1,28 @@
+# Host-specific integration; grants host-user access. No HTTP authentication.
+# Keep the isolated preview on 17685 while this runs on 17688.
+[Unit]
+Description=Host-connected omp-web rebuild preview
+After=default.target
+
+[Container]
+ContainerName=omp-web-rebuild-host
+Image=localhost/omp-web-rebuild:18.3.2-3
+PublishPort=0.0.0.0:17688:8080
+Volume=%h:/home/jieniu
+Volume=/tmp/tmux-1000:/tmp/tmux-0
+Volume=%t/systemd:/run/user/1000/systemd
+Volume=%t/bus:/run/user/1000/bus
+Volume=/etc/localtime:/etc/localtime:ro
+Environment=HOME=/home/jieniu
+Environment=OMP_WEB_ROOT=/home/jieniu/.containers/omp-web-rebuild
+Environment=OMP_TMUX_SOCKET=/tmp/tmux-0/default
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+WorkingDir=/home/jieniu
+
+[Service]
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
