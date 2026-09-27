@@ -245,3 +245,12 @@ UID 1000; mounted config/auth files had identical host/container inode numbers;
 eight auth records were visible without reading credential values. The eight
 pre-existing pane PIDs remained unchanged. Only the temporary verification
 shell window was removed. No provider API request was made.
+
+### Connection bar
+
+The connection bar is hidden while connected, giving its height back to the
+terminal. It appears during connection/reconnection or failure with the manual
+Reconnect action. Verified with a real WebSocket close: hidden while connected,
+visible on disconnect, hidden again after automatic reconnect. Explicit grid
+rows keep the mobile keybar below the terminal when the header is hidden.
+Image `localhost/omp-web-rebuild:18.3.2-4` includes this behavior.

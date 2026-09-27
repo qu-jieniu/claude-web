@@ -78,6 +78,7 @@
     connection.dataset.state = state;
     connection.textContent = message;
     const connected = state === 'connected';
+    connection.closest('.connection-bar').hidden = connected;
     term.options.disableStdin = !connected;
     for (const button of keybar.querySelectorAll('button')) {
       button.disabled = button.dataset.key !== 'select' && !connected;

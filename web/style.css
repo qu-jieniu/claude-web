@@ -49,6 +49,7 @@ button:focus-visible, textarea:focus-visible {
 }
 
 .connection-bar {
+  grid-row: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -65,6 +66,7 @@ button:focus-visible, textarea:focus-visible {
 #reconnect { flex: none; }
 
 #terminal {
+  grid-row: 2;
   min-height: 0;
   min-width: 0;
   padding: 4px;
@@ -81,6 +83,7 @@ button:focus-visible, textarea:focus-visible {
 #terminal .xterm:focus-within { outline: 1px solid #51647b; outline-offset: 2px; }
 
 #keybar {
+  grid-row: 3;
   display: none;
   min-width: 0;
   align-items: center;
