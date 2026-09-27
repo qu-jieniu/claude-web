@@ -254,3 +254,10 @@ Reconnect action. Verified with a real WebSocket close: hidden while connected,
 visible on disconnect, hidden again after automatic reconnect. Explicit grid
 rows keep the mobile keybar below the terminal when the header is hidden.
 Image `localhost/omp-web-rebuild:18.3.2-4` includes this behavior.
+
+### Phone toolbar order
+
+Image `18.3.2-5` prioritizes Select, Paste, Esc, Ctrl-C and Tab, followed by the
+four arrows, Ctrl-A, Ctrl-L, Detach and Ctrl-D. The visible Select label is
+shorter; its accessible label remains Select terminal text. The first five
+actions fit the measured 360px Android viewport without horizontal scrolling.

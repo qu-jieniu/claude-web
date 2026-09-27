@@ -6,7 +6,7 @@ After=default.target
 
 [Container]
 ContainerName=omp-web-rebuild-host
-Image=localhost/omp-web-rebuild:18.3.2-4
+Image=localhost/omp-web-rebuild:18.3.2-5
 PublishPort=0.0.0.0:17688:8080
 Volume=%h:/home/jieniu
 Volume=/tmp/tmux-1000:/tmp/tmux-0
