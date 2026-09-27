@@ -159,6 +159,17 @@ dialog textarea {
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .dialog-actions button { min-height: 44px; }
 
+#selection-dialog { width: min(720px, calc(100% - 16px)); padding: 12px; }
+#selection-text {
+  height: 45dvh;
+  resize: none;
+  font-family: ui-monospace, monospace;
+  user-select: text;
+  -webkit-user-select: text;
+  touch-action: auto;
+}
+#selection-status { min-height: 1.5em; }
+
 @media (any-pointer: coarse) {
   #keybar { display: flex; }
   .connection-bar button, #notice button { min-width: 44px; min-height: 44px; }

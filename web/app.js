@@ -63,7 +63,7 @@
   });
 
   function focusTerminal() {
-    if (!pasteDialog.open) term.textarea.focus({ preventScroll: true });
+    if (!document.querySelector('dialog[open]')) term.textarea.focus({ preventScroll: true });
   }
 
   function setPrefix(armed) {
@@ -79,7 +79,9 @@
     connection.textContent = message;
     const connected = state === 'connected';
     term.options.disableStdin = !connected;
-    for (const button of keybar.querySelectorAll('button')) button.disabled = !connected;
+    for (const button of keybar.querySelectorAll('button')) {
+      button.disabled = button.dataset.key !== 'select' && !connected;
+    }
     sendPaste.disabled = !connected;
     if (!connected) setPrefix(false);
   }
@@ -377,6 +379,54 @@
     return true;
   });
 
+  const selectionDialog = document.getElementById('selection-dialog');
+  const selectionText = document.getElementById('selection-text');
+  const selectionStatus = document.getElementById('selection-status');
+
+  function openSelection() {
+    const buffer = term.buffer.active;
+    let text = '';
+    for (let row = buffer.viewportY; row < buffer.viewportY + term.rows; row++) {
+      const line = buffer.getLine(row);
+      if (!line) break;
+      if (row > buffer.viewportY && !line.isWrapped) text += '\n';
+      text += line.translateToString(true);
+    }
+    selectionText.value = text;
+    selectionStatus.textContent = '';
+    selectionDialog.showModal();
+    selectionText.scrollTop = 0;
+  }
+
+  document.getElementById('select-all').addEventListener('click', () => {
+    selectionText.focus();
+    selectionText.select();
+  });
+  document.getElementById('copy-selection').addEventListener('pointerdown', event => event.preventDefault());
+  document.getElementById('copy-selection').addEventListener('click', async () => {
+    const start = selectionText.selectionStart;
+    const end = selectionText.selectionEnd;
+    if (start === end) {
+      selectionStatus.textContent = 'Long-press to select text, or tap Select all first.';
+      return;
+    }
+    const text = selectionText.value.slice(start, end);
+    // The synchronous copy command retains the user gesture on plain HTTP.
+    selectionText.focus({ preventScroll: true });
+    selectionText.setSelectionRange(start, end);
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch {}
+    if (!copied && navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(text); copied = true; } catch {}
+    }
+    selectionStatus.textContent = copied ? 'Copied selected text.' : 'Use Copy in your phone’s native selection menu.';
+  });
+  document.getElementById('close-selection').addEventListener('click', () => selectionDialog.close());
+  selectionDialog.addEventListener('close', () => {
+    selectionText.value = '';
+    focusTerminal();
+  });
+
   // Cancel focus transfer, not the click: tapping a terminal key keeps the
   // actual xterm textarea (and the phone keyboard) focused.
   keybar.addEventListener('pointerdown', event => {
@@ -387,6 +437,7 @@
     if (!button || button.disabled) return;
     const key = button.dataset.key;
     if (key === 'paste') { pasteClipboard(); return; }
+    if (key === 'select') { openSelection(); return; }
     if (key === 'prefix') {
       const armed = !prefixArmed;
       if (sendInput('\x01')) setPrefix(armed);

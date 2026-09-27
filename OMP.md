@@ -198,3 +198,15 @@ rows while keeping `PHONE_HISTORY_0194` at the top. Phone paste was executed by
 the real shell and produced the expected file content. Physical iOS, other
 Android keyboards, and screen-reader use remain unverified. No model request
 was sent during smoke testing.
+
+### Phone selection update
+
+The first phone keybar button, **Select text**, opens a frozen copy of the visible
+terminal in a read-only native text area. Long-press a word and adjust the native
+selection, then tap **Copy**; **Select all** selects the complete snapshot.
+Close and scroll the terminal before opening another snapshot to copy older text.
+Copy attempts a gesture-bound browser copy first, so plain HTTP can work without
+the secure-context Clipboard API; the native copy menu remains the fallback.
+Verified on the physical Android device: long-press selected `persistent`, and
+both partial-selection and Select-all copy commands reported success.
+Image `localhost/omp-web-rebuild:18.3.2-3` includes this update.
