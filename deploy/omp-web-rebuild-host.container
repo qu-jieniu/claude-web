@@ -1,13 +1,13 @@
 # Host-specific integration; grants host-user access. No HTTP authentication.
-# Keep the isolated preview on 17685 while this runs on 17688.
+# Production upstream for omp.jieniuu8.com; host Caddy enforces tailnet access.
 [Unit]
-Description=Host-connected omp-web rebuild preview
+Description=Host-connected omp web terminal
 After=default.target
 
 [Container]
 ContainerName=omp-web-rebuild-host
 Image=localhost/omp-web-rebuild:18.3.2-7
-PublishPort=0.0.0.0:17688:8080
+PublishPort=127.0.0.1:17688:8080
 Volume=%h:/home/jieniu
 Volume=/tmp/tmux-1000:/tmp/tmux-0
 Volume=%t/systemd:/run/user/1000/systemd

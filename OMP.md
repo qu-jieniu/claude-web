@@ -217,10 +217,10 @@ Image `localhost/omp-web-rebuild:18.3.2-3` includes this update.
 
 ### Host-connected preview
 
-`omp-web-rebuild-host-preview.service` runs the host-connected preview at
-`http://100.73.84.116:17688/`, published on all IPv4 interfaces at the user's
-request. This grants unauthenticated host-user access to anyone who can reach
-the port. The isolated preview on 17685 remains alive with its own home volume;
+The initial `omp-web-rebuild-host-preview.service` exposed the host-connected
+preview at `http://100.73.84.116:17688/` on all IPv4 interfaces at the user's
+request. The domain cutover below replaces it with a persistent, loopback-only
+upstream. The isolated preview on 17685 remains alive with its own home volume;
 its running omp/shell processes were not stopped for this integration.
 
 The host home is mounted at `/home/jieniu`, including the existing auth database,
@@ -237,11 +237,11 @@ existing host-bridge integration.
 the same launcher, overlay, frontend and viewer. Run `npm ci && npm run build`
 when recreating the worktree: its generated `web/vendor/` must exist.
 
-`deploy/omp-web-rebuild-host.container` records the host-specific deployment.
-The current service is transient; to make it persistent, stop
-`omp-web-rebuild-host-preview`, install that quadlet in
-`~/.config/containers/systemd/`, daemon-reload, and start `omp-web-rebuild-host`.
-Do not start both on the same port. Adapt paths and UID before using another host.
+`deploy/omp-web-rebuild-host.container` records the persistent host deployment.
+It is installed at `~/.config/containers/systemd/omp-web-rebuild-host.container`;
+`omp-web-rebuild-host.service` starts with the lingering user manager's default
+target. The old transient host preview is stopped. Adapt paths and UID before
+using another host.
 
 Verified: browser picker lists the existing host session; a new browser-created
 shell ran as host UID 1000 outside the container; systemd bridge also returned
@@ -318,3 +318,33 @@ Phone-size Chromium layout was observed; physical-phone IME behavior for this
 new composer remains unverified. The real-model smoke used the configured account:
 the first local-model attempt returned 401 and omp switched to its configured
 fallback; the deployed smoke explicitly used that account-backed model.
+
+### Domain cutover
+
+`https://omp.jieniuu8.com/` now serves the rebuilt app through the host Caddy
+reverse proxy to `127.0.0.1:17688`. The upstream is loopback-only, preventing
+direct network access from bypassing the vhost's configured Tailscale-only rule.
+The persistent quadlet uses image `18.3.2-7` and the existing shared host mounts.
+The legacy `omp-web.service` remains running unchanged at
+`http://127.0.0.1:7685/` (its ttyd transport remains `127.0.0.1:7682`).
+No host omp or tmux process was restarted.
+
+The editable proxy source `~/caddy/Caddyfile` is updated. The live route was
+switched through Caddy's scoped admin API with an ETag precondition, without
+changing unrelated vhosts. **Privileged persistence is still required:**
+
+```sh
+sudo ~/caddy/deploy.sh
+```
+
+That command copies the source to root-owned `/etc/caddy/Caddyfile`, regenerates
+the dashboard, and reloads Caddy. Noninteractive sudo authentication was not
+available during cutover. Until this step completes, a Caddy restart or reload
+from `/etc/caddy/Caddyfile` restores the old route; its system unit does not use
+`--resume`. The dashboard link itself remains `https://omp.jieniuu8.com/`.
+
+Verified through the real HTTPS hostname: secure browser context, connected
+terminal WebSocket, launcher menu, multiline local composer, and composer API.
+The non-tailnet loopback HTTPS path returned 403. The legacy localhost app
+returned 200, both legacy port mappings remained loopback-only, and all eight
+pre-existing host pane PIDs were unchanged.
