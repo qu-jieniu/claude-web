@@ -27,6 +27,13 @@ HISTORY_TIMEOUT = 10
 # stalled upload pins a worker thread (and a part-written file) indefinitely.
 BODY_READ_TIMEOUT = 30
 # tmux target: window id (@N), name, or session:window — never a shell string.
+# Window fields for the frontend's window bar, mirroring omp-launcher's listing
+# so both agree on what a window is.
+WINDOW_LIST_FORMAT = '\t'.join([
+    '#{session_name}', '#{window_index}', '#{window_name}', '#{window_id}',
+    '#{window_active}', '#{pane_dead}',
+    '#{?pane_current_path,#{pane_current_path},#{pane_start_path}}',
+])
 WINDOW_RE = re.compile(r'^[A-Za-z0-9_@:.+-]{1,64}$')
 
 
@@ -239,7 +246,51 @@ class UploadHandler(BaseHTTPRequestHandler):
         if url.path in ('/history/search', '/history/search/'):
             self.handle_history_search()
             return
+        if url.path in ('/windows', '/windows/'):
+            self.handle_windows()
+            return
         self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'Not found'})
+
+    def handle_windows(self):
+        """List tmux windows for the frontend's window bar.
+
+        The bar replaces tmux's own status line (tmux.conf sets `status off`):
+        that was a single terminal row, hard to tap accurately, and it cost a row
+        on every client. `active` is per session - the window a client attached
+        to that session is looking at.
+        """
+        listing = self.tmux('list-windows', '-a', '-F', WINDOW_LIST_FORMAT)
+        if listing is None:
+            self.send_json(HTTPStatus.BAD_GATEWAY, {'ok': False, 'error': 'tmux unavailable'})
+            return
+        windows = []
+        for raw in listing.splitlines():
+            fields = raw.split('\t', 6)
+            if len(fields) != 7:
+                continue
+            session, index, name, window, active, dead, path = fields
+            windows.append({
+                'session': session, 'index': index, 'name': name, 'id': window,
+                'active': active == '1', 'dead': dead == '1', 'path': path,
+            })
+        windows.sort(key=lambda w: (w['session'], int(w['index']) if w['index'].isdigit() else 0))
+        self.send_json(HTTPStatus.OK, {'ok': True, 'windows': windows})
+
+    def handle_window_select(self):
+        """Make a session's window current - what tapping a bar tab means.
+
+        select-window changes the window that session shows, so the client
+        attached to it follows. This frontend attaches with -d, so there is one.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        window = (query.get('window') or [None])[0]
+        if window is None or not WINDOW_RE.match(window):
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid window'})
+            return
+        if self.tmux('select-window', '-t', window) is None:
+            self.send_json(HTTPStatus.BAD_GATEWAY, {'ok': False, 'error': 'select failed'})
+            return
+        self.send_json(HTTPStatus.OK, {'ok': True})
 
     def handle_presence(self):
         """Record which tmux window (if any) is on screen right now, and when.
@@ -281,6 +332,9 @@ class UploadHandler(BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         if url.path in ('/presence', '/presence/'):
             self.handle_presence()
+            return
+        if url.path in ('/windows/select', '/windows/select/'):
+            self.handle_window_select()
             return
         if url.path not in ('/upload', '/upload/'):
             self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'Not found'})

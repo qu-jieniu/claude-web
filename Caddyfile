@@ -17,6 +17,9 @@
 	handle /history* {
 		reverse_proxy 127.0.0.1:{$OMP_UPLOAD_PORT}
 	}
+	handle /windows* {
+		reverse_proxy 127.0.0.1:{$OMP_UPLOAD_PORT}
+	}
 	handle /t/* {
 		reverse_proxy 127.0.0.1:{$OMP_TERMINAL_PORT}
 	}

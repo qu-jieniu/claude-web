@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -385,3 +386,105 @@ class HistoryEndpointTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WindowEndpointTests(unittest.TestCase):
+    """The window bar's endpoints. The frontend owns that bar because tmux's own
+    status line (now `status off`) was a single terminal row, too thin to tap."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory(prefix='omp-windows-test-')
+        cls.socket = str(Path(cls.temp_dir.name) / 'tmux')
+        cls.tmux = ['tmux', '-S', cls.socket]
+        subprocess.run(cls.tmux + ['new-session', '-d', '-s', 'bar', '-n', 'one', '-x', '80', '-y', '24',
+                                   'bash --norc -i'], capture_output=True)
+        for name in ('two', 'three'):
+            subprocess.run(cls.tmux + ['new-window', '-d', '-t', '=bar:', '-n', name, 'bash --norc -i'],
+                           capture_output=True)
+        time.sleep(0.4)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('127.0.0.1', 0))
+            cls.port = s.getsockname()[1]
+        cls.proc = subprocess.Popen([
+            sys.executable, str(ROOT / 'omp-web-upload'),
+            '--port', str(cls.port), '--bind', '127.0.0.1',
+            '--dir', str(Path(cls.temp_dir.name) / 'uploads'),
+            '--presence-file', str(Path(cls.temp_dir.name) / 'presence'),
+            '--tmux-socket', cls.socket,
+        ], stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(('127.0.0.1', cls.port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        try:
+            cls.proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            cls.proc.kill()
+            cls.proc.wait()
+        if cls.proc.stderr:
+            cls.proc.stderr.close()
+        subprocess.run(cls.tmux + ['kill-server'], capture_output=True)
+        cls.temp_dir.cleanup()
+
+    def windows(self):
+        with urllib.request.urlopen(f'http://127.0.0.1:{self.port}/windows') as resp:
+            return resp.status, json.loads(resp.read().decode('utf-8'))
+
+    def select(self, window):
+        request = urllib.request.Request(
+            f'http://127.0.0.1:{self.port}/windows/select?window={urllib.parse.quote(window)}',
+            data=b'', headers={'Content-Length': '0'}, method='POST')
+        with urllib.request.urlopen(request) as resp:
+            return resp.status, json.loads(resp.read().decode('utf-8'))
+
+    def active_names(self):
+        out = subprocess.run(self.tmux + ['list-windows', '-t', 'bar', '-F',
+                                          '#{window_active} #{window_name}'],
+                             capture_output=True, text=True).stdout.splitlines()
+        return [line.split()[1] for line in out if line.startswith('1 ')]
+
+    def test_lists_windows_with_ids_names_and_the_active_flag(self):
+        status, payload = self.windows()
+        self.assertEqual(status, 200)
+        self.assertTrue(payload['ok'])
+        mine = [w for w in payload['windows'] if w['session'] == 'bar']
+        self.assertEqual([w['name'] for w in mine], ['one', 'two', 'three'])
+        # index numbering follows base-index, which this harness inherits from
+        # whatever tmux config exists - assert order and uniqueness instead
+        indexes = [int(w['index']) for w in mine]
+        self.assertEqual(indexes, sorted(indexes))
+        self.assertEqual(len(set(indexes)), 3)
+        self.assertTrue(all(w['id'].startswith('@') for w in mine))
+        self.assertEqual(len([w for w in mine if w['active']]), 1)
+        self.assertTrue(all(w['dead'] is False for w in mine))
+        self.assertTrue(all(w['path'] for w in mine))
+
+    def test_select_makes_the_window_current(self):
+        _, payload = self.windows()
+        target = next(w for w in payload['windows'] if w['session'] == 'bar' and w['name'] == 'three')
+        self.assertNotIn('three', self.active_names())
+        status, result = self.select(target['id'])
+        self.assertEqual(status, 200)
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.active_names(), ['three'])
+        _, payload = self.windows()
+        self.assertTrue(next(w for w in payload['windows'] if w['id'] == target['id'])['active'])
+
+    def test_select_rejects_an_invalid_window(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self.select('bad;id')
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_select_reports_an_unknown_window(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self.select('@9999')
+        self.assertEqual(ctx.exception.code, 502)

@@ -9,7 +9,7 @@ home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-47` and attaches to
+**Active persistent deployment:** production runs `18.3.2-48` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -41,11 +41,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-47 .
+podman build -t localhost/omp-web-rebuild:18.3.2-48 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-47
+  localhost/omp-web-rebuild:18.3.2-48
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2087,3 +2087,32 @@ red/blue image in the browser (`.xterm-image-layer` present, screenshot
 captured) where the same sequence produced nothing before. The addon renders
 SIXEL and iTerm2, not Kitty, so forcing SIXEL keeps both ends agreed. Existing
 omp processes keep their old environment - a new window is needed.
+
+### Web-rendered window bar replaces tmux's status line (`18.3.2-48`)
+
+tmux's status line was a single terminal row (`status-position top`), hard to tap
+accurately, and it cost a row on every client including native ones. It is now
+off (`set -g status off`; the `window-status-*` formats became inert and were
+dropped), and the frontend draws its own bar:
+
+- `GET /windows` lists every session's windows (session, index, name, id, active,
+  dead, path) through the service's existing tmux helper, with the same field set
+  as `omp-launcher`'s own listing.
+- `POST /windows/select?window=@N` runs `select-window`, so the client attached to
+  that session follows. Both validate the target against `WINDOW_RE`: a malformed
+  one is a 400, an unknown one a 502 (tmux refuses it).
+- The bar is 36px of real buttons, scrolls horizontally, marks the active window
+  per session, dims dead panes, and scrolls the tapped tab into view. It polls
+  every 3s while the tab is visible and stops when hidden, mirroring the presence
+  heartbeat's lifecycle, and stays hidden on the launcher page where no session
+  is attached.
+
+Caddy needs a `/windows*` route to the service, added next to `/upload`,
+`/presence` and `/history`.
+
+Verified: 33 unit tests pass, including four new endpoint tests (listing fields,
+switching makes the window current, 400 on a malformed target, 502 on an unknown
+one). In the browser on a session with three windows: the bar lists all twelve,
+tapping `bartest:2 three` moves tmux's active window to three and the client
+follows (the pane's `I-AM-WINDOW-THREE` marker fills the screen), and tmux's own
+status row is gone. Image `18.3.2-48`.

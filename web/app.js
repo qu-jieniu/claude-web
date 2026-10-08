@@ -132,6 +132,9 @@
   const LOW_WATER = 64 * 1024;
   const MAX_PENDING = 8 * 1024 * 1024;
   const PRESENCE_INTERVAL_MS = 5000;
+  // The window bar is navigation, so it can lag a little; tmux's list-windows is
+  // a local call and this only runs while the tab is visible.
+  const WINDOW_BAR_INTERVAL_MS = 3000;
 
   // Tells the discord-alert extension "this specific tmux window is on screen
   // right now", independent of whether the WebSocket/tmux client is still
@@ -155,6 +158,74 @@
     clearInterval(presenceTimer);
     presenceTimer = null;
   }
+
+  // tmux's own status line is off (tmux.conf): this bar replaces it. Real
+  // buttons, tall enough to tap, and it lists every session's windows, not just
+  // the attached one. Hidden on the launcher page, where there is no session.
+  const windowBar = document.getElementById('window-bar');
+  let windowBarBusy = false;
+  let windowBarTimer = null;
+
+  async function refreshWindowBar() {
+    if (windowBarBusy || !currentArg) return;
+    windowBarBusy = true;
+    try {
+      const response = await fetch('/windows', { cache: 'no-store' });
+      const data = await response.json();
+      if (!data?.ok || !Array.isArray(data.windows) || !data.windows.length) return;
+      windowBar.replaceChildren(...data.windows.map(entry => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.window = entry.id;
+        if (entry.dead) button.dataset.dead = '1';
+        button.textContent = `${entry.session}:${entry.index} ${entry.name}`;
+        button.setAttribute('aria-current', entry.active ? 'true' : 'false');
+        button.setAttribute('aria-label', `Switch to ${entry.session} window ${entry.index} (${entry.name})`);
+        return button;
+      }));
+      windowBar.hidden = false;
+      if (!windowBar.dataset.ready) {
+        // First paint: bring the window this tab is attached to into view.
+        windowBar.dataset.ready = '1';
+        const mine = currentArg?.replace('tmux-', '@');
+        const attached = data.windows.find(entry => entry.id === mine) ||
+          data.windows.find(entry => entry.active);
+        windowBar.querySelector(`button[data-window="${attached?.id}"]`)
+          ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+      }
+    } catch {
+      // Keep the last known list: the bar is navigation, not authoritative state.
+    } finally {
+      windowBarBusy = false;
+    }
+  }
+
+  function startWindowBar() {
+    if (windowBarTimer !== null) return;
+    refreshWindowBar();
+    windowBarTimer = setInterval(refreshWindowBar, WINDOW_BAR_INTERVAL_MS);
+  }
+
+  function stopWindowBar() {
+    clearInterval(windowBarTimer);
+    windowBarTimer = null;
+  }
+
+  windowBar.addEventListener('click', async event => {
+    const button = event.target.closest('button[data-window]');
+    if (!button || button.getAttribute('aria-current') === 'true') return;
+    // Show the tap immediately, then let the next refresh confirm it.
+    for (const other of windowBar.querySelectorAll('button')) {
+      other.setAttribute('aria-current', 'false');
+    }
+    button.setAttribute('aria-current', 'true');
+    button.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    try {
+      await fetch(`/windows/select?window=${encodeURIComponent(button.dataset.window)}`,
+                  { method: 'POST', cache: 'no-store' });
+    } catch {}
+    refreshWindowBar();
+  });
 
   // Text that a browser refused to put on the clipboard because the request had
   // no user gesture (which is what tmux's asynchronous OSC 52 copy looks like).
@@ -561,20 +632,26 @@
     leaving = true;
     clearTimeout(resizeTimer);
     stopPresenceHeartbeat();
+    stopWindowBar();
     retireConnection();
   });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       clearTimeout(resizeTimer);
       stopPresenceHeartbeat();
+      stopWindowBar();
     } else if (!leaving) {
       scheduleFit();
       startPresenceHeartbeat();
+      startWindowBar();
     }
   });
   window.addEventListener('pageshow', event => {
     leaving = false;
-    if (!document.hidden) startPresenceHeartbeat();
+    if (!document.hidden) {
+      startPresenceHeartbeat();
+      startWindowBar();
+    }
     if (!event.persisted) {
       scheduleFit();
       return;
@@ -582,7 +659,10 @@
     replaceArg(new URL(location.href).searchParams.get('arg'));
     connect();
   });
-  if (!document.hidden) startPresenceHeartbeat();
+  if (!document.hidden) {
+    startPresenceHeartbeat();
+    startWindowBar();
+  }
 
   function composerConnected() {
     return active?.ready && active.socket?.readyState === WebSocket.OPEN && !leaving;

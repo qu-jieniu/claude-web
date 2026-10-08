@@ -1,4 +1,7 @@
 :root {
+  /* Height of the frontend's own tmux window bar; also offsets the notice and
+     the copy flash, which sit below the header + bar. */
+  --window-bar-height: 36px;
   color-scheme: dark;
   font-family: system-ui, sans-serif;
   background: #161a21;
@@ -45,7 +48,7 @@ button:focus-visible, textarea:focus-visible {
     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
   overflow: hidden;
 }
 
@@ -65,8 +68,48 @@ button:focus-visible, textarea:focus-visible {
 #connection[data-state="disconnected"] { color: #ffcc88; }
 #reconnect { flex: none; }
 
-#terminal {
+/* tmux's own status line is off (tmux.conf); this is its replacement: a real
+   button row, tall enough to tap, listing every session's windows. */
+#window-bar {
   grid-row: 2;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  height: var(--window-bar-height);
+  padding: 3px 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid #303b49;
+  background: #1b222b;
+  touch-action: pan-x;
+  scrollbar-width: thin;
+}
+
+#window-bar button {
+  flex: 0 0 auto;
+  max-width: 42vw;
+  padding: 0 10px;
+  border: 1px solid #3c4a5c;
+  border-radius: 5px;
+  background: #232c37;
+  color: #c8d2e0;
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#window-bar button[aria-current="true"] {
+  background: #2b4a6b;
+  border-color: #6d9ed6;
+  color: #fff;
+}
+
+#window-bar button[data-dead="1"] { opacity: 0.6; font-style: italic; }
+
+#terminal {
+  grid-row: 3;
   min-height: 0;
   min-width: 0;
   padding: 4px;
@@ -94,7 +137,7 @@ button:focus-visible, textarea:focus-visible {
 #terminal .xterm:focus-within { outline: 1px solid #51647b; outline-offset: 2px; }
 
 #terminal-tools {
-  grid-row: 4;
+  grid-row: 5;
   display: flex;
   min-width: 0;
   gap: 4px;
@@ -107,7 +150,7 @@ button:focus-visible, textarea:focus-visible {
 #composer-toggle[aria-expanded="true"] { background: #354d65; }
 
 #composer {
-  grid-row: 3;
+  grid-row: 4;
   min-width: 0;
   max-height: var(--composer-max-height, 190px);
   padding: 4px;
@@ -191,7 +234,7 @@ button:focus-visible, textarea:focus-visible {
 #notice {
   position: absolute;
   z-index: 5;
-  top: calc(env(safe-area-inset-top, 0px) + 54px);
+  top: calc(env(safe-area-inset-top, 0px) + 54px + var(--window-bar-height));
   right: calc(env(safe-area-inset-right, 0px) + 8px);
   left: calc(env(safe-area-inset-left, 0px) + 8px);
   display: flex;
@@ -211,7 +254,7 @@ button:focus-visible, textarea:focus-visible {
 #copied-flash {
   position: absolute;
   z-index: 6;
-  top: calc(env(safe-area-inset-top, 0px) + 54px);
+  top: calc(env(safe-area-inset-top, 0px) + 54px + var(--window-bar-height));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
