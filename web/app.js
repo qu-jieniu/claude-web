@@ -147,12 +147,27 @@
   // Kept so the notice's Copy button can retry inside a real gesture.
   let pendingClipboard = null;
 
-  function showNotice(message, copyText = null) {
+  let noticeTimer = null;
+
+  /** Show the notice bar. copyText keeps a Copy button available; autoHideMs
+   *  clears it again after a confirmation (a blocked copy stays until
+   *  dismissed, because it still needs an action). */
+  function showNotice(message, copyText = null, autoHideMs = 0) {
+    clearTimeout(noticeTimer);
+    noticeTimer = autoHideMs ? setTimeout(hideNotice, autoHideMs) : null;
     noticeText.textContent = message;
     pendingClipboard = copyText;
     pendingClipboardAt = Date.now();
     noticeCopy.hidden = !copyText;
     notice.hidden = false;
+  }
+
+  function hideNotice() {
+    clearTimeout(noticeTimer);
+    noticeTimer = null;
+    notice.hidden = true;
+    pendingClipboard = null;
+    noticeCopy.hidden = true;
   }
 
   /** Put text on the clipboard inside a live user gesture. Returns true on
@@ -214,15 +229,11 @@
     if (hasDomSelection || hasInputSelection) return;   // the browser's own copy wins
     event.clipboardData?.setData('text/plain', pendingClipboard);
     event.preventDefault();
-    pendingClipboard = null;
-    noticeCopy.hidden = true;
-    noticeText.textContent = 'Copied to clipboard.';
+    showNotice('Copied to clipboard.', pendingClipboard, 4000);
   });
 
   document.getElementById('dismiss-notice').addEventListener('click', () => {
-    notice.hidden = true;
-    pendingClipboard = null;
-    noticeCopy.hidden = true;
+    hideNotice();
     focusTerminal();
   });
 
@@ -726,10 +737,13 @@
       const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
       const text = decoder.decode(bytes);
       writeClipboard(text).then(copied => {
-        if (copied) return;
-        // No gesture backs this write (tmux copied on its own), so browsers
-        // refuse it - keep the text and offer a button that can.
-        showNotice('Clipboard copy was blocked. Press Copy to place it on the clipboard.', text);
+        // Always refresh the notice. Reporting only failures left the previous
+        // notice - and its Copy button - frozen after a silent success, so a
+        // second selection looked like the copy option had disappeared.
+        showNotice(copied
+          ? 'Copied to clipboard.'
+          : 'Clipboard copy was blocked. Press Copy to place it on the clipboard.',
+          text, copied ? 4000 : 0);
       });
     } catch {
       showNotice('The terminal clipboard request could not be decoded.');

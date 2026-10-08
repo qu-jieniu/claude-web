@@ -9,7 +9,7 @@ home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-44` and attaches to
+**Active persistent deployment:** production runs `18.3.2-45` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -41,11 +41,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-44 .
+podman build -t localhost/omp-web-rebuild:18.3.2-45 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-44
+  localhost/omp-web-rebuild:18.3.2-45
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2009,3 +2009,24 @@ is inert and that Ctrl-C still reaches the pty (`^C` twice in the pane).
 Safari itself could not be exercised here - there is no Safari on this host - so
 the failure mode was reproduced against WebKit's documented per-task gesture
 rule, not in Safari. Image `18.3.2-44`, deployed to `omp-web-rebuild-host.service`.
+
+### The copy notice refreshes on every terminal copy (`18.3.2-45`, frontend)
+
+Reported from Safari: the copy notice appeared once and then stopped, and the
+browser's own Copy was greyed out. The latter is expected - with tmux owning the
+drag there is no DOM selection, so macOS Edit > Copy has nothing to copy and the
+notice *is* the copy affordance. The former was the bug: the notice was only
+raised when the async clipboard write *rejected*, so once a write was accepted
+the app said nothing and left the previous notice - and its Copy button - frozen,
+making the next selection look like the option had disappeared.
+
+Every terminal copy now refreshes the notice. A write that lands shows
+"Copied to clipboard." for four seconds with the Copy button still available; a
+refused write keeps the persistent notice and its button. The bar is an absolute
+overlay (`position: absolute`, z-index 5), so showing it does not reflow the
+terminal or resize the tmux pane.
+
+Verified with the async API stubbed both ways: silent success -> the notice
+appears on the first and the second copy and clears itself after 4s; refusal ->
+it appears on both copies and is still present after 4.5s with the button
+visible. Image `18.3.2-45`, deployed to `omp-web-rebuild-host.service`.

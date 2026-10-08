@@ -7,7 +7,7 @@ After=omp-web-tmux.service
 
 [Container]
 ContainerName=omp-web-rebuild-host
-Image=localhost/omp-web-rebuild:18.3.2-44
+Image=localhost/omp-web-rebuild:18.3.2-45
 PublishPort=127.0.0.1:17688:8080
 Volume=%h:/home/jieniu
 Volume=%t/systemd:/run/user/1000/systemd
