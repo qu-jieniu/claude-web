@@ -9,7 +9,7 @@ home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-45` and attaches to
+**Active persistent deployment:** production runs `18.3.2-46` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -41,11 +41,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-45 .
+podman build -t localhost/omp-web-rebuild:18.3.2-46 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-45
+  localhost/omp-web-rebuild:18.3.2-46
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2030,3 +2030,26 @@ Verified with the async API stubbed both ways: silent success -> the notice
 appears on the first and the second copy and clears itself after 4s; refusal ->
 it appears on both copies and is still present after 4.5s with the button
 visible. Image `18.3.2-45`, deployed to `omp-web-rebuild-host.service`.
+
+### A scissors flash for a copy that lands (`18.3.2-46`, frontend)
+
+A brief scissors pill replaces the success notice: centred at the top in the
+notice's palette, 850 ms of fade and scale via the Web Animations API (so a
+repeat copy restarts it cleanly instead of fighting a CSS animation). It is an
+absolute overlay with `pointer-events: none`, so it neither reflows the terminal
+nor resizes the tmux pane, and a successful copy no longer raises the notice bar
+at all. A refused write still raises the persistent notice with its Copy button.
+
+Wired to every path that puts text on the clipboard: the terminal's OSC 52 copy,
+the notice's Copy button, the Command-C handler, and the Select dialog's Copy.
+Also fixed here: the notice's Copy button still updated the notice by hand - the
+`18.3.2-45` patch to that handler never matched its source - so it left the bar
+on screen instead of clearing it.
+
+Verified through the UI: a terminal copy shows the pill (36x36 px, top centre,
+`opacity: 1`) and it clears itself within ~1 s; a refused write shows no pill and
+keeps the notice with its button; that button flashes the pill and hides the bar;
+Command-C does the same under a macOS user agent and stays inert under a Linux
+one; the dialog's Copy flashes it alongside "Copied 33 lines.". A screenshot of
+the pill was captured for the visual check. Image `18.3.2-46`, deployed to
+`omp-web-rebuild-host.service`.

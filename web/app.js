@@ -10,6 +10,7 @@
   const notice = document.getElementById('notice');
   const noticeText = document.getElementById('notice-text');
   const noticeCopy = document.getElementById('notice-copy');
+  const copiedFlash = document.getElementById('copied-flash');
   const pasteDialog = document.getElementById('paste-dialog');
   const pasteText = document.getElementById('paste-text');
   const sendPaste = document.getElementById('send-paste');
@@ -162,6 +163,24 @@
     notice.hidden = false;
   }
 
+  let copiedFlashAnimation = null;
+
+  /** Flash the scissors pill: something just landed on the clipboard. */
+  function flashCopied() {
+    copiedFlash.hidden = false;
+    copiedFlashAnimation?.cancel();
+    copiedFlashAnimation = copiedFlash.animate([
+      { opacity: 0, transform: 'translateX(-50%) scale(0.85)' },
+      { opacity: 1, transform: 'translateX(-50%) scale(1)', offset: 0.18 },
+      { opacity: 1, transform: 'translateX(-50%) scale(1)', offset: 0.7 },
+      { opacity: 0, transform: 'translateX(-50%) scale(0.95)' },
+    ], { duration: 850, easing: 'ease-out' });
+    copiedFlashAnimation.onfinish = () => {
+      copiedFlash.hidden = true;
+      copiedFlashAnimation = null;
+    };
+  }
+
   function hideNotice() {
     clearTimeout(noticeTimer);
     noticeTimer = null;
@@ -201,14 +220,13 @@
     const text = pendingClipboard;
     if (!text) return;
     // Synchronous first, while this click's gesture is guaranteed to be live.
-    let copied = copyInGesture(text) || await writeClipboard(text);
+    const copied = copyInGesture(text) || await writeClipboard(text);
     if (copied) {
-      pendingClipboard = null;
-      noticeCopy.hidden = true;
-      noticeText.textContent = 'Copied to clipboard.';
-    } else {
-      noticeText.textContent = 'Copy was refused by the browser. Select the text and copy it manually.';
+      hideNotice();
+      flashCopied();
+      return;
     }
+    noticeText.textContent = 'Copy was refused by the browser. Select the text and copy it manually.';
   });
 
   // tmux copies on its own, so no gesture backs the OSC 52 write and browsers
@@ -229,7 +247,8 @@
     if (hasDomSelection || hasInputSelection) return;   // the browser's own copy wins
     event.clipboardData?.setData('text/plain', pendingClipboard);
     event.preventDefault();
-    showNotice('Copied to clipboard.', pendingClipboard, 4000);
+    hideNotice();
+    flashCopied();
   });
 
   document.getElementById('dismiss-notice').addEventListener('click', () => {
@@ -740,10 +759,12 @@
         // Always refresh the notice. Reporting only failures left the previous
         // notice - and its Copy button - frozen after a silent success, so a
         // second selection looked like the copy option had disappeared.
-        showNotice(copied
-          ? 'Copied to clipboard.'
-          : 'Clipboard copy was blocked. Press Copy to place it on the clipboard.',
-          text, copied ? 4000 : 0);
+        if (copied) {
+          hideNotice();
+          flashCopied();
+          return;
+        }
+        showNotice('Clipboard copy was blocked. Press Copy to place it on the clipboard.', text);
       });
     } catch {
       showNotice('The terminal clipboard request could not be decoded.');
@@ -1117,6 +1138,7 @@
     }
     // Synchronous first, carrying exactly the payload the user selected.
     const copied = copyInGesture(payload) || await writeClipboard(payload);
+    if (copied) flashCopied();
     selectionStatus.textContent = copied
       ? (hasSelection ? 'Copied selection.' : `Copied ${historyRaw.length} lines.`)
       : 'Copy was denied — select the text and use your browser menu.';

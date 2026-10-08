@@ -205,6 +205,35 @@ button:focus-visible, textarea:focus-visible {
   font-size: 14px;
 }
 
+/* A brief scissors pill for a copy that landed. Overlay only: it must not
+   reflow the terminal (or resize the tmux pane), and it takes no pointer
+   events so it can never swallow a click. */
+#copied-flash {
+  position: absolute;
+  z-index: 6;
+  top: calc(env(safe-area-inset-top, 0px) + 54px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border: 1px solid #a18a64;
+  border-radius: 999px;
+  background: #322b20;
+  box-shadow: 0 4px 16px #0008;
+  color: #d8e0ee;
+  pointer-events: none;
+}
+
+#copied-flash svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 #notice-text { flex: 1; overflow-wrap: anywhere; }
 #notice button { flex: none; }
 
