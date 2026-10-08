@@ -809,6 +809,25 @@
     uploadFiles(files);
   });
 
+  // Safari has no navigator.clipboard.read() at all, so an image on the clipboard
+  // is only visible through a paste event (Command-V / Ctrl-V). Intercept it in
+  // the capture phase, before xterm sees it: a terminal has nowhere to put
+  // pixels, so the image is uploaded and its @path inserted instead. Text pastes
+  // fall through untouched.
+  document.addEventListener('paste', event => {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind !== 'file' || !item.type?.startsWith('image/')) continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+      event.preventDefault();
+      event.stopPropagation();
+      uploadFiles([file]);
+      return;
+    }
+  }, true);
+
   /** The first image on the clipboard as a File, or null - also when the browser
    *  refuses clipboard.read() (it needs the clipboard-read permission). */
   async function readClipboardImage() {
@@ -860,7 +879,11 @@
         await uploadFiles([image]);
         return;
       }
-      showNotice('Nothing to paste: the clipboard holds no text or image. Use Attach for a file.');
+      // Safari never reaches the branch above (no clipboard.read at all), so say
+      // how to get an image in there rather than only what failed.
+      showNotice(navigator.clipboard?.read
+        ? 'Nothing to paste: the clipboard holds no text or image. Use Attach for a file.'
+        : 'Nothing to paste as text. Press the paste shortcut (⌘V) for an image, or use Attach.');
     } catch {
       if (!leaving) openPasteDialog();
     }

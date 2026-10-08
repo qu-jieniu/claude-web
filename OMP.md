@@ -9,7 +9,7 @@ home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-49` and attaches to
+**Active persistent deployment:** production runs `18.3.2-50` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -41,11 +41,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-49 .
+podman build -t localhost/omp-web-rebuild:18.3.2-50 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-49
+  localhost/omp-web-rebuild:18.3.2-50
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2135,3 +2135,21 @@ Verified with a real `ClipboardItem`: a 172-byte PNG on the clipboard was
 uploaded byte-identically (matching SHA-256) and its `@path` was inserted into
 the terminal; text still pastes as text; an empty clipboard shows the notice.
 Image `18.3.2-49`.
+
+### Pasting an image works in Safari too (`18.3.2-50`, frontend)
+
+`18.3.2-49` read clipboard images with `navigator.clipboard.read()`, which Safari
+does not implement at all, so on Safari the Paste button still did nothing for an
+image. Safari exposes clipboard images only through a **paste event**, so that is
+now handled directly: a `paste` listener in the capture phase (before xterm sees
+it) uploads the first `image/*` item and inserts its `@path`, exactly like Attach.
+Text pastes are untouched - ⌘V of text still reaches the shell - and the button
+keeps working for text everywhere. Where the button cannot read an image (no
+`clipboard.read`), the notice now says what to do instead: "Nothing to paste as
+text. Press the paste shortcut (⌘V) for an image, or use Attach."
+
+Verified: a synthetic paste event carrying a 113-byte PNG was intercepted
+(`defaultPrevented`) and uploaded byte-identically (matching SHA-256, original
+filename preserved) with its `@path` inserted into the terminal; a text-only paste
+event was not intercepted; with `clipboard.read` removed (Safari's shape) the
+button shows the guidance notice. Image `18.3.2-50`.
