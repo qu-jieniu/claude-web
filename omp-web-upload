@@ -31,7 +31,7 @@ BODY_READ_TIMEOUT = 30
 # so both agree on what a window is.
 WINDOW_LIST_FORMAT = '\t'.join([
     '#{session_name}', '#{window_index}', '#{window_name}', '#{window_id}',
-    '#{window_active}', '#{pane_dead}',
+    '#{window_active}', '#{pane_dead}', '#{window_activity_flag}', '#{window_bell_flag}',
     '#{?pane_current_path,#{pane_current_path},#{pane_start_path}}',
 ])
 WINDOW_RE = re.compile(r'^[A-Za-z0-9_@:.+-]{1,64}$')
@@ -265,13 +265,19 @@ class UploadHandler(BaseHTTPRequestHandler):
             return
         windows = []
         for raw in listing.splitlines():
-            fields = raw.split('\t', 6)
-            if len(fields) != 7:
+            fields = raw.split('\t', 8)
+            if len(fields) != 9:
                 continue
-            session, index, name, window, active, dead, path = fields
+            session, index, name, window, active, dead, activity, bell, path = fields
             windows.append({
                 'session': session, 'index': index, 'name': name, 'id': window,
-                'active': active == '1', 'dead': dead == '1', 'path': path,
+                'active': active == '1', 'dead': dead == '1',
+                # tmux raises these while a window is not the current one and
+                # clears them when it is selected: activity on output (only with
+                # monitor-activity, which is off by default) and bell on BEL -
+                # which is how omp signals a finished turn.
+                'activity': activity == '1', 'bell': bell == '1',
+                'path': path,
             })
         windows.sort(key=lambda w: (w['session'], int(w['index']) if w['index'].isdigit() else 0))
         self.send_json(HTTPStatus.OK, {'ok': True, 'windows': windows})

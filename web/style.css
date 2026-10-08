@@ -108,6 +108,39 @@ button:focus-visible, textarea:focus-visible {
 
 #window-bar button[data-dead="1"] { opacity: 0.6; font-style: italic; }
 
+/* tmux raised these while the window was not the current one and cleared them
+   when it was selected; the bell is how a finished omp turn announces itself. */
+#window-bar button[data-bell="1"],
+#window-bar button[data-activity="1"] {
+  border-color: #d6a86d;
+  color: #ffe6c2;
+  box-shadow: inset 0 0 0 1px #d6a86d55;
+}
+
+#window-bar button[data-bell="1"]::before {
+  content: '\2022';
+  margin-right: 5px;
+  color: #ffcf87;
+}
+
+#app.drag-over::after {
+  content: 'Drop to upload';
+  position: absolute;
+  z-index: 7;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 12px 18px;
+  border: 1px solid #6d9ed6;
+  border-radius: 8px;
+  background: #223047;
+  color: #dbe6f5;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+#app.drag-over #terminal { outline: 2px dashed #6d9ed6; outline-offset: -3px; }
+
 #terminal {
   grid-row: 3;
   min-height: 0;

@@ -9,7 +9,7 @@ home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-51` and attaches to
+**Active persistent deployment:** production runs `18.3.2-52` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -41,11 +41,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-51 .
+podman build -t localhost/omp-web-rebuild:18.3.2-52 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-51
+  localhost/omp-web-rebuild:18.3.2-52
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2171,3 +2171,29 @@ shows "Nothing to paste as text. Use Attach to pick a photo or a file.", and
 picking a file through the hidden input uploaded it and inserted
 `@/home/jieniu/.omp/uploads/20261008_211641_iphone-photo.png` into the shell.
 Image `18.3.2-51`.
+
+### Window bar: finished-turn highlight, and drag-and-drop upload (`18.3.2-52`)
+
+**A finished turn is visible again.** tmux's status line highlighted a window when
+something happened in it - for omp that is the bell it rings when a turn
+completes. `/windows` now reports tmux's `window_activity_flag` and
+`window_bell_flag`; the bar outlines and dots those tabs, and a tab that *becomes*
+flagged scrolls itself into view, since an off-screen highlight is not a
+notification. tmux clears both flags when the window is selected, so viewing a
+window dismisses it - measured: a bell in a non-current window set `bell=1` and
+selecting it cleared it. `monitor-activity` is off by default, so activity flags
+appear only if it is turned on; the bell does not depend on it.
+
+**Drag and drop uploads.** Dropping files anywhere on the app uploads them through
+the same `uploadFiles` path as Attach and Paste, with a "Drop to upload" overlay
+while dragging; dropping a link or a selection types it into the terminal.
+`dragover`/`drop` are cancelled, which is also what stops the browser navigating
+away from the session and opening the file.
+
+Verified: 34 unit tests pass, including a new one that rings a bell in a
+non-current window, sees the flag, and watches it clear on select. In the browser:
+a dropped 28x18 PNG uploaded byte-identically (SHA-256 match) with its `@path`
+inserted; the drag overlay appeared during the drag and cleared after the drop;
+a bell set `data-bell` with the amber outline and dot, and scrolled the flagged
+tab into view (`scrollLeft` 314 -> 471) when it was off-screen; tapping it cleared
+the flag. Image `18.3.2-52`.

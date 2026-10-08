@@ -165,6 +165,7 @@
   const windowBar = document.getElementById('window-bar');
   let windowBarBusy = false;
   let windowBarTimer = null;
+  let windowBarFlagged = new Set();
 
   async function refreshWindowBar() {
     if (windowBarBusy || !currentArg) return;
@@ -178,12 +179,18 @@
         button.type = 'button';
         button.dataset.window = entry.id;
         if (entry.dead) button.dataset.dead = '1';
+        if (entry.activity) button.dataset.activity = '1';
+        if (entry.bell) button.dataset.bell = '1';
         button.textContent = `${entry.session}:${entry.index} ${entry.name}`;
         button.setAttribute('aria-current', entry.active ? 'true' : 'false');
         button.setAttribute('aria-label', `Switch to ${entry.session} window ${entry.index} (${entry.name})`);
         return button;
       }));
       windowBar.hidden = false;
+      const flagged = new Set(data.windows.filter(entry => entry.bell || entry.activity)
+        .map(entry => entry.id));
+      const newlyFlagged = [...flagged].filter(id => !windowBarFlagged.has(id));
+      windowBarFlagged = flagged;
       if (!windowBar.dataset.ready) {
         // First paint: bring the window this tab is attached to into view.
         windowBar.dataset.ready = '1';
@@ -191,6 +198,12 @@
         const attached = data.windows.find(entry => entry.id === mine) ||
           data.windows.find(entry => entry.active);
         windowBar.querySelector(`button[data-window="${attached?.id}"]`)
+          ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+      } else if (newlyFlagged.length) {
+        // A finished turn is only a notification if you can see it: a tab that
+        // just got flagged scrolls itself into view, the way tmux's status line
+        // showed it in place.
+        windowBar.querySelector(`button[data-window="${newlyFlagged[0]}"]`)
           ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
       }
     } catch {
@@ -737,6 +750,44 @@
       terminalAction = false;
     }
   }
+
+  // Drag a file anywhere onto the app to upload it, the same path as Attach.
+  // dragover must be cancelled or the browser navigates away from the session and
+  // opens the dropped file instead of uploading it.
+  let dragDepth = 0;
+  const appRoot = document.getElementById('app');
+  appRoot.addEventListener('dragenter', event => {
+    if (!event.dataTransfer?.types?.includes('Files')) return;
+    event.preventDefault();
+    dragDepth += 1;
+    appRoot.classList.add('drag-over');
+  });
+  appRoot.addEventListener('dragover', event => {
+    if (!event.dataTransfer?.types?.includes('Files')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  });
+  appRoot.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) appRoot.classList.remove('drag-over');
+  });
+  appRoot.addEventListener('drop', event => {
+    event.preventDefault();
+    dragDepth = 0;
+    appRoot.classList.remove('drag-over');
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (files.length) {
+      uploadFiles(files);
+      return;
+    }
+    // Dragging a link or a selection types it into the terminal, which is what
+    // dropping text on a terminal does anywhere else.
+    const text = event.dataTransfer?.getData('text/plain');
+    if (text) {
+      pasteToTerminal(text);
+      focusTerminal();
+    }
+  });
 
   function openFilePicker() {
     if (uploading) return;

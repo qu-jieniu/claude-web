@@ -466,6 +466,7 @@ class WindowEndpointTests(unittest.TestCase):
         self.assertTrue(all(w['id'].startswith('@') for w in mine))
         self.assertEqual(len([w for w in mine if w['active']]), 1)
         self.assertTrue(all(w['dead'] is False for w in mine))
+        self.assertTrue(all(isinstance(w['activity'], bool) and isinstance(w['bell'], bool) for w in mine))
         self.assertTrue(all(w['path'] for w in mine))
 
     def test_select_makes_the_window_current(self):
@@ -478,6 +479,29 @@ class WindowEndpointTests(unittest.TestCase):
         self.assertEqual(self.active_names(), ['three'])
         _, payload = self.windows()
         self.assertTrue(next(w for w in payload['windows'] if w['id'] == target['id'])['active'])
+
+    def test_reports_the_bell_flag_and_clears_it_when_selected(self):
+        """tmux raises the bell flag for a window that is not current - how a
+        finished omp turn announces itself - and clears it when it is selected.
+        The bar's highlight relies on exactly that."""
+        _, payload = self.windows()
+        mine = [w for w in payload['windows'] if w['session'] == 'bar']
+        first, two = mine[0], next(w for w in mine if w['name'] == 'two')
+        self.select(first['id'])                      # make sure 'two' is not current
+        _, payload = self.windows()
+        self.assertFalse(next(w for w in payload['windows'] if w['id'] == two['id'])['bell'])
+
+        subprocess.run(self.tmux + ['send-keys', '-t', 'bar:two', r'printf "\a"', 'Enter'],
+                       capture_output=True)
+        time.sleep(0.6)
+        _, payload = self.windows()
+        flagged = next(w for w in payload['windows'] if w['id'] == two['id'])
+        self.assertTrue(flagged['bell'], 'a bell in a non-current window must set the flag')
+        self.assertFalse(flagged['active'])
+
+        self.select(two['id'])
+        _, payload = self.windows()
+        self.assertFalse(next(w for w in payload['windows'] if w['id'] == two['id'])['bell'])
 
     def test_select_rejects_an_invalid_window(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
