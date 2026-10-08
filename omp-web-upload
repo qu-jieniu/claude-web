@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""Lightweight upload and presence service for omp-web."""
+
+import argparse
+from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
+
+# Terminal history paging. `count` is capped so one request cannot ask for the
+# whole scrollback; the client pages with `offset` (lines back from the end).
+DEFAULT_HISTORY_LINES = 1000
+MAX_HISTORY_LINES = 5000
+MAX_SEARCH_RESULTS = 500
+HISTORY_TIMEOUT = 10
+# Cap how long a client may take to deliver a declared body. Without this a
+# stalled upload pins a worker thread (and a part-written file) indefinitely.
+BODY_READ_TIMEOUT = 30
+# tmux target: window id (@N), name, or session:window — never a shell string.
+WINDOW_RE = re.compile(r'^[A-Za-z0-9_@:.+-]{1,64}$')
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal and shell injection."""
+    name = filename.replace('\\', '/').rstrip('/')
+    name = os.path.basename(name).strip()
+    name = re.sub(r'[^A-Za-z0-9._-]', '_', name)
+    name = name.lstrip('.')
+    if not name:
+        name = 'upload.bin'
+    return name
+
+
+def reserve_upload_path(uploads_dir: Path, original_name: str):
+    """Exclusively create this upload's file, returning (path, open handle).
+
+    The timestamp has second granularity and ThreadingHTTPServer serves requests
+    concurrently, so a plain exists() check lets two same-second uploads of the
+    same name pick one path and then truncate each other's writes. O_EXCL makes
+    the reservation atomic; a collision just advances the counter.
+    """
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    clean = sanitize_filename(original_name)
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+    stem, ext = os.path.splitext(clean)
+    candidate = f"{stamp}_{clean}"
+    counter = 1
+    while True:
+        try:
+            path = uploads_dir / candidate
+            return path, open(path, 'xb')
+        except FileExistsError:
+            candidate = f"{stamp}_{stem}_{counter}{ext}"
+            counter += 1
+
+
+class UploadHandler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
+    def send_json(self, status: int, data: dict):
+        body = json.dumps(data).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def tmux(self, *args, timeout=HISTORY_TIMEOUT):
+        """Run a tmux client command against the shared server socket.
+
+        Returns stdout text, or None on any failure (no server, bad target,
+        timeout). Arguments are passed as a list - never through a shell.
+        """
+        socket_path = self.server.tmux_socket
+        if not socket_path or not os.path.exists(socket_path):
+            return None
+        try:
+            result = subprocess.run(
+                ['tmux', '-S', socket_path, *args],
+                capture_output=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.decode('utf-8', errors='replace')
+
+    def handle_history(self):
+        """Return a page of tmux scrollback for one window, oldest-first.
+
+        Captured from tmux (not from the browser), because under tmux the
+        client's xterm buffer never grows beyond one screen - tmux repaints the
+        pane region instead of streaming scroll-inducing newlines - so the
+        frontend cannot see history on its own. `offset` counts lines back from
+        the end (0 = newest), `count` is the page size, `more` says whether
+        older lines remain.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        window = (query.get('window') or [''])[0]
+        if not WINDOW_RE.match(window):
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid window'})
+            return
+        try:
+            offset = int((query.get('offset') or ['0'])[0])
+            count = int((query.get('count') or [str(DEFAULT_HISTORY_LINES)])[0])
+        except ValueError:
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid offset/count'})
+            return
+        if offset < 0:
+            # Reject rather than clamp: a negative offset is a client bug and
+            # silently serving page 0 would hide it.
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid offset'})
+            return
+        count = max(1, min(count, MAX_HISTORY_LINES))
+        colour = (query.get('color') or ['0'])[0] not in ('0', '', 'false', 'no')
+
+        info = self.tmux('display-message', '-p', '-t', window,
+                         '#{window_id} #{history_size} #{pane_height}')
+        if not info:
+            # No tmux server behind the socket, or the client errored.
+            self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'window not found'})
+            return
+        parts = info.split()
+        if len(parts) < 3 or not parts[0]:
+            # tmux exits 0 with empty expansions for an unknown target, so the
+            # empty window_id is what actually identifies a bad target.
+            self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'window not found'})
+            return
+        try:
+            history_size, pane_height = int(parts[1]), int(parts[2])
+        except ValueError:
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'ok': False, 'error': 'bad tmux reply'})
+            return
+
+        # Absolute line index i (0 = oldest history line) is tmux offset
+        # i - history_size, because 0 is the top line of the visible screen and
+        # negatives walk up into history.
+        total = history_size + pane_height
+        end = max(0, total - offset)
+        start = max(0, end - count)
+        if end == 0:
+            # Offset is past the oldest line (or history shrank while paging).
+            # capture-pane clamps -S/-E to the oldest row and would hand back an
+            # unrelated line, so reply with an honest empty page instead.
+            self.send_json(HTTPStatus.OK, {
+                'ok': True, 'window': window, 'offset': offset, 'count': count,
+                'total': total, 'start': 0, 'more': False, 'lines': [],
+            })
+            return
+        args = ['capture-pane', '-p', '-t', window,
+                '-S', str(start - history_size), '-E', str(end - 1 - history_size)]
+        if colour:
+            args.append('-e')
+        text = self.tmux(*args)
+        if text is None:
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'ok': False, 'error': 'capture failed'})
+            return
+        lines = text.split('\n')
+        if lines and lines[-1] == '':
+            lines.pop()
+        self.send_json(HTTPStatus.OK, {
+            'ok': True, 'window': window, 'offset': offset, 'count': count,
+            'total': total, 'start': start, 'more': start > 0, 'lines': lines,
+        })
+
+    def handle_history_search(self):
+        """Search the whole scrollback for a substring, newest match first.
+
+        Searched server-side because the client only holds a few pages: finding
+        something from an hour ago would otherwise require paging back through
+        everything. Returns absolute line indices, which the client converts to
+        a page offset (`total - 1 - index`).
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        window = (query.get('window') or [''])[0]
+        if not WINDOW_RE.match(window):
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid window'})
+            return
+        needle = (query.get('q') or [''])[0]
+        if not needle:
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'missing q'})
+            return
+        try:
+            limit = max(1, min(int((query.get('limit') or ['200'])[0]), MAX_SEARCH_RESULTS))
+        except ValueError:
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid limit'})
+            return
+        case_sensitive = (query.get('case') or ['0'])[0] not in ('0', '', 'false', 'no')
+
+        info = self.tmux('display-message', '-p', '-t', window,
+                         '#{window_id} #{history_size} #{pane_height}')
+        if not info:
+            self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'window not found'})
+            return
+        parts = info.split()
+        if len(parts) < 3 or not parts[0]:
+            self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'window not found'})
+            return
+
+        text = self.tmux('capture-pane', '-p', '-t', window, '-S', '-')
+        if text is None:
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'ok': False, 'error': 'capture failed'})
+            return
+        lines = text.split('\n')
+        if lines and lines[-1] == '':
+            lines.pop()
+
+        hay = needle if case_sensitive else needle.lower()
+        matches = []
+        truncated = False
+        for index in range(len(lines) - 1, -1, -1):  # newest first
+            line = lines[index]
+            probe = line if case_sensitive else line.lower()
+            if hay in probe:
+                if len(matches) >= limit:
+                    truncated = True
+                    break
+                matches.append({'index': index, 'text': line})
+        self.send_json(HTTPStatus.OK, {
+            'ok': True, 'window': window, 'query': needle,
+            'total': len(lines), 'matches': matches, 'truncated': truncated,
+        })
+
+    def do_GET(self):
+        url = urllib.parse.urlsplit(self.path)
+        if url.path in ('/history', '/history/'):
+            self.handle_history()
+            return
+        if url.path in ('/history/search', '/history/search/'):
+            self.handle_history_search()
+            return
+        self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'Not found'})
+
+    def handle_presence(self):
+        """Record which tmux window (if any) is on screen right now, and when.
+
+        Written only while the web frontend's tab is visible (see web/app.js),
+        which also reports its currently-attached window id (`?window=tmux-N`).
+        The discord-alert extension compares this against its *own* window to
+        tell "a different window on the same server is being watched" from
+        "this window is being watched" — a bare mtime touch can't make that
+        distinction. Independent of whether the WebSocket (and therefore its
+        tmux client) is still attached.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        window = (query.get('window') or [None])[0]
+        if window is not None and not WINDOW_RE.match(window):
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid window'})
+            return
+        presence_path = self.server.presence_path
+        presence_path.parent.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        # One temp file per request: a fixed name is shared by concurrent
+        # heartbeats, so the second os.replace raced the first (FileNotFoundError,
+        # or an in-place write to the published file).
+        fd, tmp_name = tempfile.mkstemp(dir=str(presence_path.parent),
+                                        prefix=presence_path.name + '.', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as handle:
+                handle.write(json.dumps({'window': window, 'ts': now}))
+            os.replace(tmp_name, presence_path)
+        except OSError:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        self.send_json(HTTPStatus.OK, {'ok': True})
+
+    def do_POST(self):
+        url = urllib.parse.urlsplit(self.path)
+        if url.path in ('/presence', '/presence/'):
+            self.handle_presence()
+            return
+        if url.path not in ('/upload', '/upload/'):
+            self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'Not found'})
+            return
+
+        uploads_dir = self.server.uploads_dir
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+
+        content_length = self.headers.get('Content-Length')
+        if not content_length:
+            self.send_json(HTTPStatus.LENGTH_REQUIRED, {'ok': False, 'error': 'Missing Content-Length'})
+            return
+
+        try:
+            length = int(content_length)
+        except ValueError:
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'Invalid Content-Length'})
+            return
+
+        if length <= 0 or length > MAX_UPLOAD_SIZE:
+            self.send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
+                'ok': False,
+                'error': f'Upload exceeds maximum size ({MAX_UPLOAD_SIZE // (1024 * 1024)} MB)'
+            })
+            return
+
+        content_type = self.headers.get('Content-Type', '')
+
+        if 'multipart/form-data' in content_type:
+            self.handle_multipart(length, content_type)
+        else:
+            self.handle_raw(length)
+
+    def handle_raw(self, length: int):
+        uploads_dir = self.server.uploads_dir
+        raw_name = self.headers.get('X-Filename', 'upload.bin')
+        dest, handle = reserve_upload_path(uploads_dir, raw_name)
+
+        bytes_read = 0
+        try:
+            self.connection.settimeout(BODY_READ_TIMEOUT)
+            with handle:
+                while bytes_read < length:
+                    chunk = self.rfile.read(min(65536, length - bytes_read))
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    bytes_read += len(chunk)
+        except OSError:
+            # Timeout or disconnect: drop the partial file instead of leaving a
+            # truncated upload behind.
+            dest.unlink(missing_ok=True)
+            self.send_json(HTTPStatus.REQUEST_TIMEOUT, {'ok': False, 'error': 'Upload timed out'})
+            return
+        finally:
+            self.connection.settimeout(None)
+
+        if bytes_read != length:
+            dest.unlink(missing_ok=True)
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'Incomplete upload'})
+            return
+
+        self.send_json(HTTPStatus.OK, {
+            'ok': True,
+            'filename': dest.name,
+            'path': str(dest.resolve()),
+            'size': bytes_read
+        })
+
+    def handle_multipart(self, length: int, content_type: str):
+        uploads_dir = self.server.uploads_dir
+        match = re.search(r'boundary=([^;]+)', content_type)
+        if not match:
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'Missing multipart boundary'})
+            return
+
+        boundary = match.group(1).strip('"\'').encode('latin1')
+        delimiter = b'--' + boundary
+
+        try:
+            self.connection.settimeout(BODY_READ_TIMEOUT)
+            data = self.rfile.read(length)
+        except OSError:
+            self.send_json(HTTPStatus.REQUEST_TIMEOUT, {'ok': False, 'error': 'Upload timed out'})
+            return
+        finally:
+            self.connection.settimeout(None)
+        if len(data) != length:
+            self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'Incomplete upload'})
+            return
+
+        parts = data.split(delimiter)
+        for part in parts:
+            if not part or part.startswith(b'--'):
+                continue
+            if b'\r\n\r\n' not in part:
+                continue
+            raw_headers, raw_body = part.split(b'\r\n\r\n', 1)
+            # Remove exactly the CRLF that frames the part (\r\n before the
+            # delimiter) - rstrip() also ate a file's own trailing newline.
+            body = raw_body[:-2] if raw_body.endswith(b'\r\n') else raw_body
+            headers_str = raw_headers.decode('latin1', errors='replace')
+
+            # Parse filename from Content-Disposition
+            disp_match = re.search(r'Content-Disposition:\s*form-data;\s*name="[^"]+";\s*filename="([^"]+)"',
+                                   headers_str, re.IGNORECASE)
+            if not disp_match:
+                continue
+
+            orig_filename = disp_match.group(1)
+            dest, handle = reserve_upload_path(uploads_dir, orig_filename)
+            with handle:
+                handle.write(body)
+
+            self.send_json(HTTPStatus.OK, {
+                'ok': True,
+                'filename': dest.name,
+                'path': str(dest.resolve()),
+                'size': len(body)
+            })
+            return
+
+        self.send_json(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'No file part found in request'})
+
+    def log_message(self, format, *args):
+        # Terse syslog-friendly logging
+        sys.stderr.write(f"omp-web-upload: {self.address_string()} - {format % args}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--port', type=int, default=int(os.environ.get('OMP_UPLOAD_PORT', '7684')))
+    parser.add_argument('--bind', default=os.environ.get('OMP_UPLOAD_BIND', '127.0.0.1'))
+    parser.add_argument('--dir', default=os.environ.get('OMP_UPLOADS_DIR', os.path.expanduser('~/.omp/uploads')))
+    parser.add_argument('--presence-file', default=os.environ.get('OMP_PRESENCE_FILE', os.path.expanduser('~/.omp/web-visible')))
+    parser.add_argument('--tmux-socket', default=os.environ.get('OMP_TMUX_SOCKET', os.path.expanduser('~/.omp/run/host-tmux/default')))
+    args = parser.parse_args()
+
+    uploads_dir = Path(args.dir).resolve()
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    presence_path = Path(args.presence_file).resolve()
+
+    server = ThreadingHTTPServer((args.bind, args.port), UploadHandler)
+    server.uploads_dir = uploads_dir
+    server.presence_path = presence_path
+    server.tmux_socket = args.tmux_socket
+
+    print(f"omp-web-upload: listening on {args.bind}:{args.port}, storing to {uploads_dir}, presence at {presence_path}, tmux socket {args.tmux_socket}", file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == '__main__':
+    main()

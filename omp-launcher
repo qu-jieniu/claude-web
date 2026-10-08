@@ -16,7 +16,11 @@ from dataclasses import dataclass
 ROOT = Path(__file__).resolve().parent
 UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 UUID_PREFIX = re.compile(r"[0-9a-fA-F][0-9a-fA-F-]{0,35}\Z")
-OMP_COMMAND = '"$@"; result=$?; if [ "$result" -ne 0 ]; then exit "$result"; fi; exec /bin/bash -i'
+OMP_COMMAND = (
+    'tmux set-option -p -t "$TMUX_PANE" remain-on-exit failed || exit; '
+    '"$@"; result=$?; if [ "$result" -ne 0 ]; then exit "$result"; fi; '
+    'tmux set-option -p -t "$TMUX_PANE" remain-on-exit off || exit; exec /bin/bash -i'
+)
 
 
 def clean(value):
@@ -122,6 +126,20 @@ def approve():
     return None if answer is None else answer.lower() in ("y", "yes")
 
 
+def choose_continue():
+    line("c  Continue latest conversation (omp -c)")
+    line("n  Start new conversation (omp)")
+    while True:
+        answer = prompt("Continue / new [n] (q cancels): ", "n")
+        if answer is None or answer.lower() == "q":
+            return None
+        if answer.lower() in ("c", "continue"):
+            return True
+        if answer.lower() in ("n", "new"):
+            return False
+        line("Choose c to continue, n for new, or q to cancel.")
+
+
 @dataclass
 class Window:
     session: str
@@ -196,6 +214,10 @@ def saved_sessions():
 class Multiplexer:
     def __init__(self):
         self.command = ["tmux", "-u"]
+        # A host-connected appliance must never create its own replacement
+        # server when the persistent host service is unavailable.
+        if os.environ.get("OMP_TMUX_REQUIRE_SERVER") == "1":
+            self.command.append("-N")
         if os.environ.get("OMP_TMUX_SOCKET"):
             self.command += ["-S", os.path.expanduser(os.environ["OMP_TMUX_SOCKET"])]
         self.session = os.environ.get("OMP_TMUX_SESSION", "1")
@@ -255,10 +277,10 @@ class Multiplexer:
     def attach(self, window=None, pane=None):
         if pane is not None and self.run("select-pane", "-t", pane) is None:
             return False
-        action = "switch-client" if self.inside else "attach-session"
+        action = ["switch-client"] if self.inside else ["attach-session", "-d"]
         try:
             # Keep the tty on stdout too: switch-client uses it to identify its client.
-            result = subprocess.run(self.command + [action] + (["-t", window] if window else []), env=self.env)
+            result = subprocess.run(self.command + action + (["-t", window] if window else []), env=self.env)
             if result.returncode:
                 line("Could not attach; the target may have closed.")
             elif self.inside:
@@ -307,10 +329,11 @@ def attach_screen(screen):
         line("screen is not installed or not on PATH.")
 
 
-def omp_command(auto, session=None):
-    args = ["omp", "--resume", session.id] if session else ["omp", "-c"]
-    args += ["--allow-home", "--config", str(ROOT / "omp-config.yml"),
-             "--extension", str(ROOT / "omp-web-composer-bridge.ts")]
+def omp_command(auto, session=None, *, continue_previous=False):
+    args = ["omp", "--resume", session.id] if session else ["omp"]
+    if session is None and continue_previous:
+        args.append("-c")
+    args += ["--allow-home", "--config", str(ROOT / "omp-config.yml")]
     if os.environ.get("OMP_SESSION_DIR"):
         args += ["--session-dir", canonical(os.environ["OMP_SESSION_DIR"])]
     if auto:
@@ -326,10 +349,13 @@ def new_window(mux, shell=False):
     name = prompt(f"Window name [{default}]: ", default)
     if name is None:
         return False
+    continue_previous = False if shell else choose_continue()
+    if continue_previous is None:
+        return False
     auto = False if shell else approve()
     if auto is None:
         return False
-    command = ["/bin/bash", "-il"] if shell else omp_command(auto)
+    command = ["/bin/bash", "-il"] if shell else omp_command(auto, continue_previous=continue_previous)
     window = mux.create(cwd, name, command)
     return mux.attach(window.strip()) if window else False
 
@@ -421,10 +447,20 @@ def direct(mux, target):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog="Ctrl-a d detaches back to this menu. OMP_TMUX_SOCKET selects a socket path; OMP_TMUX_SESSION defaults to 1; OMP_SESSION_DIR selects saved session storage.")
     parser.add_argument("target", nargs="?", help="tmux-N for stable window @N, tmux, or an existing legacy screen suffix")
+    parser.add_argument("--new-omp", action="store_true", help="choose continue or new OMP in the current tmux pane")
     target = sys.argv[1] if len(sys.argv) == 2 else None
     if target in ("--help", "-h"):
         parser.print_help()
         return 0
+    if target == "--new-omp":
+        continue_previous = choose_continue()
+        if continue_previous is None:
+            return 0
+        auto = approve()
+        if auto is None:
+            return 0
+        command = omp_command(auto, continue_previous=continue_previous)
+        os.execvpe(command[0], command, os.environ)
     try:
         mux = Multiplexer()
     except ValueError as error:

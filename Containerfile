@@ -31,11 +31,11 @@ ENV PATH=/opt/omp-web:/usr/local/bin:/usr/bin:/bin
 RUN dnf -y install python3 screen less ncurses caddy git curl systemd \
     libevent json-c libwebsockets libuv openssl-libs zlib && dnf clean all
 COPY --from=build /usr/local/bin/tmux /usr/local/bin/ttyd /usr/local/bin/omp /usr/local/bin/
-COPY omp-launcher omp-jsonl-view omp-jsonl-pretty omp-web-entry omp-web-launch omp-web-composer omp-web-composer-bridge.ts omp-web.sh omp-config.yml tmux.conf Caddyfile /opt/omp-web/
+COPY omp-launcher omp-jsonl-view omp-jsonl-pretty omp-web-entry omp-web-launch omp-web-upload omp-web.sh omp-config.yml tmux.conf Caddyfile /opt/omp-web/
 COPY web/ /opt/omp-web/web/
 COPY --from=build /build/web/vendor/ /opt/omp-web/web/vendor/
 RUN chmod 0755 /opt/omp-web/omp-launcher /opt/omp-web/omp-jsonl-view /opt/omp-web/omp-jsonl-pretty \
-    /opt/omp-web/omp-web-entry /opt/omp-web/omp-web-launch /opt/omp-web/omp-web-composer
+    /opt/omp-web/omp-web-entry /opt/omp-web/omp-web-launch /opt/omp-web/omp-web-upload
 WORKDIR /root
 # Writable terminal; only publish loopback or put behind an authenticated proxy.
 EXPOSE 8080 7682

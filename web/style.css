@@ -1,8 +1,8 @@
 :root {
   color-scheme: dark;
   font-family: system-ui, sans-serif;
-  background: #11151b;
-  color: #e4e8ef;
+  background: #161a21;
+  color: #b4bcca;
 }
 
 * { box-sizing: border-box; }
@@ -44,7 +44,8 @@ button:focus-visible, textarea:focus-visible {
   padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   display: grid;
-  grid-template-rows: auto minmax(64px, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   overflow: hidden;
 }
 
@@ -61,7 +62,6 @@ button:focus-visible, textarea:focus-visible {
 }
 
 #connection { min-width: 0; overflow-wrap: anywhere; }
-#connection[data-state="connected"] { color: #8ddbb4; }
 #connection[data-state="disconnected"] { color: #ffcc88; }
 #reconnect { flex: none; }
 
@@ -74,12 +74,23 @@ button:focus-visible, textarea:focus-visible {
 }
 
 #terminal .xterm { height: 100%; }
+/* pinch-zoom only: the vertical gesture is owned by our own touch-swipe
+   bridge in app.js, which emits SGR wheel reports that tmux maps to
+   copy-mode. Allowing native panning (pan-y) would let the browser start a
+   scroll and cancel our pointer stream, and under tmux there is no local
+   scrollback to pan anyway (the client's xterm buffer never grows beyond one
+   screen). Pinch-zoom stays native. */
 #terminal .xterm,
 #terminal .xterm-screen,
 #terminal .xterm-viewport {
   touch-action: pinch-zoom;
 }
-#terminal .xterm-viewport { overscroll-behavior: contain; }
+#terminal .xterm-viewport {
+  overscroll-behavior: contain;
+  /* xterm.css hard-codes #000 here; keep it on our palette instead so the
+     scrollbar gutter / overscroll area doesn't flash pure black. */
+  background-color: #161a21;
+}
 #terminal .xterm:focus-within { outline: 1px solid #51647b; outline-offset: 2px; }
 
 #terminal-tools {
@@ -92,23 +103,21 @@ button:focus-visible, textarea:focus-visible {
   border-top: 1px solid #303b49;
 }
 
-#composer-toggle { flex: none; min-height: 44px; }
+#composer-toggle { flex: none; min-height: 32px; }
 #composer-toggle[aria-expanded="true"] { background: #354d65; }
 
 #composer {
   grid-row: 3;
   min-width: 0;
-  max-height: var(--composer-max-height, 360px);
-  padding: 8px;
+  max-height: var(--composer-max-height, 190px);
+  padding: 4px;
   overflow: auto;
   overscroll-behavior: contain;
   border-top: 1px solid #465366;
-  background: #1b222c;
+  background: #202732;
 }
 
-#composer label { display: block; font-size: 14px; }
-.composer-hint { color: #b5c1d1; font-size: 12px; }
-#composer-origin, #composer-status {
+#composer-status {
   margin: 5px 0;
   font-size: 12px;
   overflow-wrap: anywhere;
@@ -117,12 +126,13 @@ button:focus-visible, textarea:focus-visible {
 #composer-text {
   display: block;
   width: 100%;
-  min-height: 64px;
-  max-height: 180px;
+  min-height: 48px;
+  height: 60px;
+  max-height: 90px;
   resize: none;
   padding: 8px;
   color: inherit;
-  background: #11151b;
+  background: #161a21;
   border: 1px solid #64758b;
   border-radius: 4px;
   font-size: 16px;
@@ -133,19 +143,19 @@ button:focus-visible, textarea:focus-visible {
 }
 .composer-actions {
   position: sticky;
-  bottom: -8px;
+  bottom: -4px;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   padding: 4px 0;
-  background: #1b222c;
+  background: #202732;
 }
 .composer-actions button { min-width: 44px; min-height: 44px; padding: 6px 8px; }
-#composer-send { margin-left: auto; background: #294a3c; }
+#composer-paste { margin-left: auto; background: #294a3c; }
 
 #keybar {
   flex: 1;
-  display: none;
+  display: flex;
   min-width: 0;
   align-items: center;
   gap: 4px;
@@ -159,15 +169,21 @@ button:focus-visible, textarea:focus-visible {
 
 #keybar button {
   flex: 0 0 auto;
-  min-width: 44px;
-  min-height: 44px;
-  padding: 8px 10px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 4px 8px;
   user-select: none;
   -webkit-user-select: none;
 }
 
+#keybar button:active,
+#keybar button.key-active {
+  background: #3c4f68;
+  border-color: #6d8ba8;
+}
+
 #prefix[aria-pressed="true"] {
-  color: #11151b;
+  color: #161a21;
   background: #8fcbff;
   border-color: #d1eaff;
 }
@@ -197,7 +213,7 @@ dialog {
   max-height: calc(100% - 24px);
   padding: 20px;
   overflow: auto;
-  background: #1b222c;
+  background: #202732;
   color: inherit;
   border: 1px solid #64758b;
   border-radius: 8px;
@@ -213,7 +229,7 @@ dialog textarea {
   min-height: 90px;
   resize: vertical;
   padding: 8px;
-  background: #11151b;
+  background: #161a21;
   color: inherit;
   border: 1px solid #64758b;
   border-radius: 4px;
@@ -223,17 +239,44 @@ dialog textarea {
 .dialog-actions button { min-height: 44px; }
 
 #selection-dialog { width: min(720px, calc(100% - 16px)); padding: 12px; }
+/* History view: real DOM text (so it is selectable and searchable), colour
+   applied as inline spans, and `white-space: pre` so long lines overflow
+   sideways instead of wrapping and breaking the line-per-row mapping. */
 #selection-text {
   height: 45dvh;
-  resize: none;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre;
+  background: #161a21;
+  border: 1px solid #64758b;
+  border-radius: 4px;
   font-family: ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.35;
   user-select: text;
   -webkit-user-select: text;
   touch-action: auto;
 }
+#selection-text .match { background: #6b5320; color: #f5ecd8; } /* 6.2:1; the inherited
+   foreground was 3.8:1, and an ANSI colour inside a match could be worse */
+#selection-text .match.current { background: #b8860b; color: #161a21; }
+.history-search { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.history-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 16px;
+  color: inherit;
+  background: #161a21;
+  border: 1px solid #64758b;
+  border-radius: 4px;
+}
+.history-search button { min-width: 40px; min-height: 40px; }
+#history-count { flex: none; font-size: 12px; min-width: 3.5em; text-align: right; }
 #selection-status { min-height: 1.5em; }
 
 @media (any-pointer: coarse) {
-  #keybar { display: flex; }
+  #keybar button, #composer-toggle { min-width: 44px; min-height: 44px; padding: 8px 10px; }
   .connection-bar button, #notice button { min-width: 44px; min-height: 44px; }
 }

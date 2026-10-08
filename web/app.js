@@ -9,18 +9,18 @@
   const prefix = document.getElementById('prefix');
   const notice = document.getElementById('notice');
   const noticeText = document.getElementById('notice-text');
+  const noticeCopy = document.getElementById('notice-copy');
   const pasteDialog = document.getElementById('paste-dialog');
   const pasteText = document.getElementById('paste-text');
   const sendPaste = document.getElementById('send-paste');
   const composer = document.getElementById('composer');
   const composerToggle = document.getElementById('composer-toggle');
   const composerText = document.getElementById('composer-text');
-  const composerOrigin = document.getElementById('composer-origin');
   const composerStatus = document.getElementById('composer-status');
-  const composerSend = document.getElementById('composer-send');
+  const composerPaste = document.getElementById('composer-paste');
   const composerClear = document.getElementById('composer-clear');
-  const composerTarget = document.getElementById('composer-target');
-  const composerCheck = document.getElementById('composer-check');
+  const composerAttach = document.getElementById('composer-attach');
+  const fileUploader = document.getElementById('file-uploader');
 
   if (!window.Terminal || !window.FitAddon) {
     connection.textContent = 'Terminal assets could not load. Reload this page to try again.';
@@ -31,18 +31,70 @@
 
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  const MIN_FONT_SIZE = 9;
+  const MAX_FONT_SIZE = 32;
+  const DEFAULT_FONT_SIZE = 14;
+
+  function getStoredFontSize() {
+    try {
+      const stored = parseInt(localStorage.getItem('terminal-font-size'), 10);
+      if (Number.isInteger(stored) && stored >= MIN_FONT_SIZE && stored <= MAX_FONT_SIZE) {
+        return stored;
+      }
+    } catch {}
+    return DEFAULT_FONT_SIZE;
+  }
+
+  function adjustFontSize(delta) {
+    const current = term.options.fontSize || DEFAULT_FONT_SIZE;
+    const target = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, current + delta));
+    if (target === current) return;
+    term.options.fontSize = target;
+    try {
+      localStorage.setItem('terminal-font-size', String(target));
+    } catch {}
+    scheduleFit();
+  }
+
   const term = new Terminal({
     fontFamily: 'ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace',
-    fontSize: 14,
+    fontSize: getStoredFontSize(),
     cursorBlink: true,
     scrollback: 10000,
     scrollOnUserInput: false,
     disableStdin: true,
-    theme: { background: '#11151b', foreground: '#e4e8ef', cursor: '#c5e3ff' },
+    // On macOS, Option+click/drag forces a normal local selection even while
+    // the running app (tmux) has mouse reporting on - the same convention
+    // every other Mac terminal uses. altClickMovesCursor defaults to true,
+    // which would make Option+click ALSO reposition the cursor; documented as
+    // "pick one", so selection wins.
+    macOptionClickForcesSelection: true,
+    altClickMovesCursor: false,
+    theme: {
+      background: '#161a21', foreground: '#b4bcca', cursor: '#9bb4d4',
+      black: '#2a2f3a', red: '#d2777d', green: '#9fc584', yellow: '#d9bc82',
+      blue: '#9bb4d4', magenta: '#bb93c7', cyan: '#7ec3c9', white: '#b4bcca',
+      brightBlack: '#6b7384', brightRed: '#e0959a', brightGreen: '#b5d6a0',
+      brightYellow: '#e6cfa0', brightBlue: '#b2c8e6', brightMagenta: '#d0b0dc',
+      brightCyan: '#9ad6dc', brightWhite: '#c8ccd6',
+      // xterm leaves selection unset by default: a barely-visible translucent
+      // grey. Set explicitly so a drag-selection is actually legible.
+      selectionBackground: '#2b4a6b',
+      selectionInactiveBackground: '#243040',
+    },
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(host);
+  // Canvas rendering avoids the DOM renderer's jitter under rapid output/scroll.
+  // WebGL would be faster still but is known to mangle glyphs (see skill docs);
+  // canvas is the safe middle ground. Falls back to the DOM renderer silently
+  // if the addon failed to load or a 2D context can't be created.
+  if (window.CanvasAddon) {
+    try {
+      term.loadAddon(new CanvasAddon.CanvasAddon());
+    } catch {}
+  }
   window.term = term;
   term.textarea.setAttribute('aria-label', 'Terminal input');
   term.textarea.setAttribute('autocapitalize', 'off');
@@ -57,30 +109,101 @@
   let leaving = false;
   let prefixArmed = false;
   let fitFrame = null;
-  let draftTarget = null;
-  let composerAvailable = false;
-  let composerChecking = false;
-  let composerSending = false;
   let composerComposing = false;
   let composerMessage = '';
-  let composerAmbiguous = false;
-  let composerCheckVersion = 0;
+  let terminalAction = false;
+  let uploading = false;
+  let presenceTimer = null;
   const HIGH_WATER = 256 * 1024;
   const LOW_WATER = 64 * 1024;
   const MAX_PENDING = 8 * 1024 * 1024;
+  const PRESENCE_INTERVAL_MS = 5000;
 
-  function showNotice(message) {
+  // Tells the discord-alert extension "this specific tmux window is on screen
+  // right now", independent of whether the WebSocket/tmux client is still
+  // attached: a minimized desktop window keeps the socket open but stops
+  // firing this. Includes the attached window id (currentArg, e.g. "tmux-2")
+  // so a session in a *different* tmux window on the same server can tell it
+  // isn't the one actually being watched, instead of treating any visible
+  // tab anywhere as "the whole server is attended".
+  function sendPresenceHeartbeat() {
+    const query = currentArg ? `?window=${encodeURIComponent(currentArg)}` : '';
+    fetch(`/presence${query}`, { method: 'POST', keepalive: true, cache: 'no-store' }).catch(() => {});
+  }
+
+  function startPresenceHeartbeat() {
+    if (presenceTimer !== null) return;
+    sendPresenceHeartbeat();
+    presenceTimer = setInterval(sendPresenceHeartbeat, PRESENCE_INTERVAL_MS);
+  }
+
+  function stopPresenceHeartbeat() {
+    clearInterval(presenceTimer);
+    presenceTimer = null;
+  }
+
+  // Text that a browser refused to put on the clipboard because the request had
+  // no user gesture (which is what tmux's asynchronous OSC 52 copy looks like).
+  // Kept so the notice's Copy button can retry inside a real gesture.
+  let pendingClipboard = null;
+
+  function showNotice(message, copyText = null) {
     noticeText.textContent = message;
+    pendingClipboard = copyText;
+    noticeCopy.hidden = !copyText;
     notice.hidden = false;
   }
 
+  /** Put text on the clipboard. Returns true on success. */
+  async function writeClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(text); return true; } catch {}
+    }
+    return false;
+  }
+
+  noticeCopy.addEventListener('click', async () => {
+    const text = pendingClipboard;
+    if (!text) return;
+    if (await writeClipboard(text)) {
+      pendingClipboard = null;
+      noticeCopy.hidden = true;
+      noticeText.textContent = 'Copied to clipboard.';
+      return;
+    }
+    // Last resort: a real selection plus the synchronous command, which is
+    // still inside this click's user gesture.
+    const scratch = document.createElement('textarea');
+    scratch.value = text;
+    scratch.setAttribute('readonly', '');
+    scratch.style.position = 'fixed';
+    scratch.style.top = '-1000px';
+    document.body.appendChild(scratch);
+    scratch.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch {}
+    scratch.remove();
+    if (copied) {
+      pendingClipboard = null;
+      noticeCopy.hidden = true;
+      noticeText.textContent = 'Copied to clipboard.';
+    } else {
+      noticeText.textContent = 'Copy was refused by the browser. Select the text and copy it manually.';
+    }
+  });
+
   document.getElementById('dismiss-notice').addEventListener('click', () => {
     notice.hidden = true;
+    pendingClipboard = null;
+    noticeCopy.hidden = true;
     focusTerminal();
   });
 
-  function focusTerminal() {
+  function focusTerminal(force = false) {
     if (!document.querySelector('dialog[open]') && !composer.contains(document.activeElement)) {
+      if (!force && matchMedia('(any-pointer: coarse)').matches && document.activeElement !== term.textarea) {
+        return;
+      }
       term.textarea.focus({ preventScroll: true });
     }
   }
@@ -104,49 +227,49 @@
     }
     sendPaste.disabled = !connected;
     if (!connected) setPrefix(false);
-    composerAvailable = false;
-    composerCheckVersion++;
-    composerChecking = false;
     renderComposer();
-    if (connected && !composer.hidden && !composerSending) checkComposerTarget();
+    scheduleFit();
   }
 
-  // Layout width deliberately comes from the layout viewport, not visualViewport:
-  // a pinch magnifies existing columns, while the keyboard still reduces height.
+  // Measure pinch zoom relative to the layout viewport. visualViewport.scale
+  // also includes Safari's page zoom: using it directly halves height at 50%.
   function scheduleFit() {
+    if (document.hidden || leaving) return;
     if (fitFrame !== null) return;
     fitFrame = requestAnimationFrame(() => {
       fitFrame = null;
+      if (document.hidden || leaving) return;
       const viewport = window.visualViewport;
-      const layoutHeight = document.documentElement.clientHeight;
-      const height = viewport ? Math.min(layoutHeight, viewport.height * viewport.scale) : layoutHeight;
+      const layout = document.documentElement;
+      const zoom = viewport ? Math.max(1, layout.clientWidth / viewport.width) : 1;
+      const height = viewport ? Math.min(layout.clientHeight, viewport.height * zoom) : layout.clientHeight;
       app.style.height = `${Math.max(1, Math.floor(height))}px`;
-      app.style.top = `${viewport && viewport.scale <= 1.01 ? viewport.offsetTop : 0}px`;
-      app.style.setProperty('--composer-max-height', `${Math.max(48, Math.min(360, height * .6, height - 150))}px`);
+      app.style.top = `${viewport && zoom <= 1.01 ? viewport.offsetTop : 0}px`;
+      app.style.setProperty('--composer-max-height', `${Math.max(100, Math.min(190, height * .34))}px`);
       if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
     });
   }
 
-  window.addEventListener('resize', scheduleFit);
-  window.visualViewport?.addEventListener('resize', scheduleFit);
-  window.visualViewport?.addEventListener('scroll', scheduleFit);
-  new ResizeObserver(scheduleFit).observe(host);
-  document.fonts.ready.then(scheduleFit);
+  window.addEventListener('resize', () => {
+    if (!document.hidden && !leaving) scheduleFit();
+  });
+  window.visualViewport?.addEventListener('resize', () => {
+    if (!document.hidden && !leaving) scheduleFit();
+  });
+  new ResizeObserver(() => {
+    if (!document.hidden && !leaving) scheduleFit();
+  }).observe(host);
+  document.fonts.ready.then(() => {
+    if (!document.hidden && !leaving) scheduleFit();
+  });
   scheduleFit();
 
   function replaceArg(arg) {
-    const changed = currentArg !== arg;
     currentArg = arg;
     const url = new URL(location.href);
     if (arg === null) url.searchParams.delete('arg');
     else url.searchParams.set('arg', arg);
     if (url.href !== location.href) history.replaceState(history.state, '', url);
-    if (changed) {
-      composerAvailable = false;
-      composerCheckVersion++;
-      composerChecking = false;
-      renderComposer();
-    }
   }
 
   function receiveTitle(raw, frame = false) {
@@ -181,9 +304,9 @@
     return true;
   }
 
-  function sendInput(data) {
+  function sendInput(data, intentional = false) {
     const ctx = active;
-    if (composer.contains(document.activeElement)) return false;
+    if (!intentional && !terminalAction && composer.contains(document.activeElement)) return false;
     if (!ctx?.ready || ctx.socket.readyState !== WebSocket.OPEN || leaving) return false;
     const bytes = typeof data === 'string' ? encoder.encode(data) : data;
     const packet = new Uint8Array(bytes.length + 1);
@@ -198,8 +321,22 @@
   // never multiply input, resize, parser, or keybar handlers.
   term.onData(sendInput);
   term.onBinary(data => sendInput(Uint8Array.from(data, character => character.charCodeAt(0))));
+  let resizeTimer = null;
+  let lastSentCols = 0;
+  let lastSentRows = 0;
+
   term.onResize(({ cols, rows }) => {
-    if (active) sendControl(active, '1', JSON.stringify({ columns: cols, rows }));
+    if (document.hidden || leaving) return;
+    if (cols === lastSentCols && rows === lastSentRows) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (document.hidden || leaving) return;
+      if (active && (cols !== lastSentCols || rows !== lastSentRows)) {
+        lastSentCols = cols;
+        lastSentRows = rows;
+        sendControl(active, '1', JSON.stringify({ columns: cols, rows }));
+      }
+    }, 80);
   });
 
   function retireConnection() {
@@ -244,7 +381,10 @@
       'macOptionIsMeta', 'rightClickSelectsWord',
     ];
     for (const name of options) {
-      if (Object.hasOwn(preferences, name)) term.options[name] = preferences[name];
+      if (Object.hasOwn(preferences, name)) {
+        if (name === 'fontSize' && localStorage.getItem('terminal-font-size')) continue;
+        term.options[name] = preferences[name];
+      }
     }
     scheduleFit();
   }
@@ -319,6 +459,8 @@
         socket.binaryType = 'arraybuffer';
         socket.addEventListener('open', () => {
           if (!isCurrent(ctx) || ctx.failed) { socket.close(); return; }
+          lastSentCols = term.cols;
+          lastSentRows = term.rows;
           socket.send(encoder.encode(JSON.stringify({ AuthToken: token ?? '', columns: term.cols, rows: term.rows })));
           clearTimeout(ctx.timeout);
           ctx.ready = true;
@@ -347,14 +489,30 @@
   });
   window.addEventListener('pagehide', () => {
     leaving = true;
+    clearTimeout(resizeTimer);
+    stopPresenceHeartbeat();
     retireConnection();
   });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      clearTimeout(resizeTimer);
+      stopPresenceHeartbeat();
+    } else if (!leaving) {
+      scheduleFit();
+      startPresenceHeartbeat();
+    }
+  });
   window.addEventListener('pageshow', event => {
-    if (!event.persisted) return;
     leaving = false;
+    if (!document.hidden) startPresenceHeartbeat();
+    if (!event.persisted) {
+      scheduleFit();
+      return;
+    }
     replaceArg(new URL(location.href).searchParams.get('arg'));
     connect();
   });
+  if (!document.hidden) startPresenceHeartbeat();
 
   function composerConnected() {
     return active?.ready && active.socket?.readyState === WebSocket.OPEN && !leaving;
@@ -362,115 +520,32 @@
 
   function renderComposer() {
     const connected = composerConnected();
-    const sameWindow = draftTarget?.windowId === currentArg;
-    const session = draftTarget?.sessionId;
-    composerOrigin.textContent = draftTarget
-      ? `Draft target: ${draftTarget.windowId || 'launcher'}${session ? ` · ${session}` : ''}`
-      : 'No draft target selected.';
-    let status = composerMessage;
-    if (composerSending) status = 'Sending to the pinned OMP session…';
-    else if (!connected) status = 'Disconnected. Your local draft is kept; reconnect before sending.';
-    else if (draftTarget && !sameWindow) {
-      status = 'The terminal window changed. Return to the draft target, or choose Retarget to move this draft to the current session.';
-    } else if (composerChecking) status = 'Checking the OMP session…';
-    if (composerAmbiguous) {
-      status = `The previous send may have been submitted. Check OMP before sending again. ${status}`;
-    }
-    composerStatus.textContent = status;
-    composerSend.disabled = !connected || !sameWindow || !composerAvailable ||
-      composerChecking || composerSending || composerComposing || !composerText.value.trim();
-    composerSend.textContent = composerAmbiguous ? 'Send again' : 'Send to OMP';
-    composerText.readOnly = composerSending;
-    composerClear.disabled = composerSending || composerComposing;
-    composerTarget.disabled = composerSending || composerChecking || composerComposing || !connected;
-    composerCheck.disabled = composerSending || composerChecking || !connected || !sameWindow;
+    composerStatus.textContent = connected ? composerMessage : 'Disconnected. Your draft is kept.';
+    composerStatus.hidden = !composerStatus.textContent;
+    composerPaste.disabled = !connected || composerComposing || !composerText.value.length;
+    composerClear.disabled = composerComposing;
+    composerAttach.disabled = uploading;
   }
 
-  function pinComposerTarget() {
-    draftTarget = { windowId: currentArg, paneId: null, sessionId: null };
-    composerAvailable = false;
-    composerCheckVersion++;
-    composerChecking = false;
-    composerMessage = '';
-    renderComposer();
-  }
-
-  async function checkComposerTarget() {
-    if (!draftTarget || !composerConnected() || draftTarget.windowId !== currentArg) {
-      renderComposer();
-      return false;
-    }
-    if (!/^tmux-\d+$/.test(draftTarget.windowId || '')) {
-      composerAvailable = false;
-      composerMessage = 'Select an OMP tmux session, then choose Retarget.';
-      renderComposer();
-      return false;
-    }
-    const version = ++composerCheckVersion;
-    const target = draftTarget;
-    const ctx = active;
-    composerChecking = true;
-    composerAvailable = false;
-    renderComposer();
-    const abort = new AbortController();
-    const timeout = setTimeout(() => abort.abort(), 10000);
-    try {
-      const response = await fetch(`/composer/target?window=${encodeURIComponent(target.windowId)}`, {
-        credentials: 'same-origin', cache: 'no-store', signal: abort.signal,
-      });
-      const result = await response.json();
-      if (version !== composerCheckVersion || target !== draftTarget || ctx !== active ||
-          !composerConnected() || target.windowId !== currentArg) return false;
-      if (!response.ok || !result.available || !result.paneId || !result.sessionId) {
-        composerMessage = result.error || result.reason || 'No available OMP session. Check session when it is ready.';
-        return false;
-      }
-      if (target.sessionId && (target.sessionId !== result.sessionId || target.paneId !== result.paneId)) {
-        composerMessage = 'The OMP session or pane changed. Choose Retarget to explicitly move this draft to the current session.';
-        return false;
-      }
-      target.paneId = result.paneId;
-      target.sessionId = result.sessionId;
-      composerAvailable = true;
-      composerMessage = 'Ready. Send submits this prompt directly to OMP, not to the terminal.';
-      return true;
-    } catch {
-      if (version === composerCheckVersion) {
-        composerMessage = 'Could not check the OMP session. Your draft is kept. Choose Check to try again.';
-      }
-      return false;
-    } finally {
-      clearTimeout(timeout);
-      if (version === composerCheckVersion) {
-        composerChecking = false;
-        renderComposer();
-      }
-    }
-  }
-
-  composerToggle.addEventListener('click', () => {
-    composer.hidden = !composer.hidden;
-    composerToggle.setAttribute('aria-expanded', String(!composer.hidden));
-    composerToggle.textContent = composer.hidden ? 'Compose' : 'Hide compose';
-    if (!composer.hidden) {
+  function setComposerOpen(open) {
+    composer.hidden = !open;
+    composerToggle.setAttribute('aria-expanded', String(open));
+    composerToggle.textContent = open ? 'Close' : 'Compose';
+    if (open) {
       setPrefix(false);
-      if (!draftTarget) pinComposerTarget();
-      if (!composerSending) checkComposerTarget();
+      renderComposer();
       composerText.focus({ preventScroll: true });
     } else {
+      composerText.blur();
       composerToggle.focus({ preventScroll: true });
     }
     scheduleFit();
-  });
+  }
+
+  composerToggle.addEventListener('click', () => setComposerOpen(composer.hidden));
   composerText.addEventListener('input', () => {
-    if (!draftTarget) {
-      pinComposerTarget();
-      checkComposerTarget();
-    }
-    composerText.style.height = '0px';
-    composerText.style.height = `${Math.min(180, composerText.scrollHeight)}px`;
+    composerMessage = '';
     renderComposer();
-    scheduleFit();
   });
   composerText.addEventListener('compositionstart', () => {
     composerComposing = true;
@@ -481,68 +556,101 @@
     renderComposer();
   });
   composerClear.addEventListener('click', () => {
-    if (composerSending || composerComposing) return;
+    if (composerComposing) return;
     composerText.value = '';
-    composerText.style.height = '';
-    composerAmbiguous = false;
-    pinComposerTarget();
-    checkComposerTarget();
-    composerText.focus({ preventScroll: true });
-    scheduleFit();
-  });
-  composerTarget.addEventListener('click', () => {
-    if (composerSending || composerComposing) return;
-    pinComposerTarget();
-    checkComposerTarget();
-  });
-  composerCheck.addEventListener('click', () => checkComposerTarget());
-  composerSend.addEventListener('click', async () => {
-    if (composerSend.disabled || composerSending || composerComposing) return;
-    composerSending = true;
-    const text = composerText.value;
-    const target = draftTarget;
-    const ctx = active;
-    let posted = false;
-    let timeout;
+    composerMessage = '';
     renderComposer();
-    try {
-      if (!await checkComposerTarget() || target !== draftTarget || ctx !== active ||
-          !composerConnected() || target.windowId !== currentArg) return;
-      const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)),
-        byte => byte.toString(16).padStart(2, '0')).join('');
-      const abort = new AbortController();
-      timeout = setTimeout(() => abort.abort(), 30000);
-      posted = true;
-      const response = await fetch('/composer/send', {
-        method: 'POST', credentials: 'same-origin', signal: abort.signal,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...target, requestId, text }),
-      });
-      const result = await response.json();
-      if (!response.ok) {
-        composerAvailable = false;
-        composerAmbiguous ||= result.ambiguous === true;
-        composerMessage = result.error || 'OMP rejected the prompt. Check session before sending again.';
-        return;
-      }
-      if (result.accepted !== true || result.requestId !== requestId) throw new Error('Unconfirmed submission');
-      composerText.value = '';
-      composerText.style.height = '';
-      composerAmbiguous = false;
-      draftTarget = null;
-      composerAvailable = false;
-      composerMessage = 'Prompt accepted by OMP. Start typing to compose another prompt.';
-    } catch {
-      composerAvailable = false;
-      composerAmbiguous ||= posted;
-      composerMessage = posted
-        ? 'Draft kept. No automatic retry will be made.'
-        : 'Could not prepare the send. Draft kept; check session before trying again.';
-    } finally {
-      clearTimeout(timeout);
-      composerSending = false;
+    composerText.focus({ preventScroll: true });
+  });
+  composerPaste.addEventListener('click', () => {
+    if (composerPaste.disabled || composerComposing) return;
+    if (!pasteToTerminal(composerText.value)) {
+      composerMessage = 'Paste could not be sent. Your draft is kept; check the terminal before trying again.';
       renderComposer();
-      scheduleFit();
+      return;
+    }
+    composerText.value = '';
+    composerMessage = '';
+    renderComposer();
+    setComposerOpen(false);
+  });
+
+  function pasteToTerminal(text) {
+    if (!composerConnected()) return false;
+    terminalAction = true;
+    try {
+      term.paste(text);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      terminalAction = false;
+    }
+  }
+
+  function openFilePicker() {
+    if (uploading) return;
+    fileUploader.click();
+  }
+
+  composerAttach.addEventListener('click', openFilePicker);
+
+  fileUploader.addEventListener('change', async () => {
+    const files = Array.from(fileUploader.files || []);
+    if (!files.length) return;
+
+    uploading = true;
+    renderComposer();
+    const count = files.length;
+    const nameLabel = count === 1 ? files[0].name : `${count} files`;
+    showNotice(`Uploading ${nameLabel}…`);
+
+    const paths = [];
+    try {
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append('file', file, file.name);
+        const res = await fetch('/upload', {
+          method: 'POST',
+          body: formData,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+          throw new Error(err.error || `Upload failed (${res.status})`);
+        }
+        const data = await res.json();
+        if (!data.ok || !data.path) {
+          throw new Error(data.error || 'Server rejected file');
+        }
+        paths.push(data.path);
+      }
+
+      const insertText = paths.map(p => '@' + p).join(' ') + ' ';
+
+      if (!composer.hidden) {
+        const start = composerText.selectionStart ?? composerText.value.length;
+        const end = composerText.selectionEnd ?? composerText.value.length;
+        const current = composerText.value;
+        composerText.value = current.slice(0, start) + insertText + current.slice(end);
+        const nextPos = start + insertText.length;
+        composerText.setSelectionRange(nextPos, nextPos);
+        composerText.focus({ preventScroll: true });
+        renderComposer();
+      } else {
+        pasteToTerminal(insertText);
+        focusTerminal();
+      }
+
+      showNotice(`Attached ${nameLabel} (@path inserted).`);
+      setTimeout(() => {
+        if (noticeText.textContent.startsWith('Attached ')) notice.hidden = true;
+      }, 4000);
+    } catch (err) {
+      showNotice(`Upload failed: ${err.message}`);
+    } finally {
+      uploading = false;
+      fileUploader.value = '';
+      renderComposer();
     }
   });
 
@@ -562,7 +670,7 @@
         showNotice('The connection changed. Paste again when your session is connected.');
         return;
       }
-      term.paste(text);
+      pasteToTerminal(text);
       focusTerminal();
     } catch {
       if (!leaving) openPasteDialog();
@@ -577,7 +685,7 @@
   document.getElementById('paste-form').addEventListener('submit', event => {
     event.preventDefault();
     if (!active?.ready) { showNotice('Reconnect before sending this paste.'); return; }
-    term.paste(pasteText.value);
+    pasteToTerminal(pasteText.value);
     pasteDialog.close();
   });
 
@@ -590,13 +698,12 @@
     try {
       const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
       const text = decoder.decode(bytes);
-      if (!navigator.clipboard?.writeText) {
-        showNotice('Clipboard copy is unavailable. Select terminal text and copy it manually.');
-      } else {
-        navigator.clipboard.writeText(text).catch(() => {
-          showNotice('Clipboard copy was denied. Select terminal text and copy it manually.');
-        });
-      }
+      writeClipboard(text).then(copied => {
+        if (copied) return;
+        // No gesture backs this write (tmux copied on its own), so browsers
+        // refuse it - keep the text and offer a button that can.
+        showNotice('Clipboard copy was blocked. Press Copy to place it on the clipboard.', text);
+      });
     } catch {
       showNotice('The terminal clipboard request could not be decoded.');
     }
@@ -606,73 +713,542 @@
   const selectionDialog = document.getElementById('selection-dialog');
   const selectionText = document.getElementById('selection-text');
   const selectionStatus = document.getElementById('selection-status');
+  const historyQuery = document.getElementById('history-query');
+  const historyCount = document.getElementById('history-count');
 
-  function openSelection() {
-    const buffer = term.buffer.active;
-    let text = '';
-    for (let row = buffer.viewportY; row < buffer.viewportY + term.rows; row++) {
-      const line = buffer.getLine(row);
-      if (!line) break;
-      if (row > buffer.viewportY && !line.isWrapped) text += '\n';
-      text += line.translateToString(true);
-    }
-    selectionText.value = text;
-    selectionStatus.textContent = '';
-    selectionDialog.showModal();
-    selectionText.scrollTop = 0;
+  // Real history comes from the server (`/history` -> tmux capture-pane),
+  // because under tmux the client's xterm buffer never grows beyond one screen
+  // - tmux repaints the pane region instead of streaming scroll-inducing
+  // newlines - so the browser cannot see history on its own. Pages load
+  // newest-first; scrolling to the top pulls in the next older page.
+  const HISTORY_CHUNK = 1000;
+  const ANSI_RE = /\x1b\[([0-9;]*)m/g;
+  let historyRaw = [];          // loaded lines, raw (may contain SGR)
+  let selectionOffset = 0;      // lines held, counted back from the end
+  let historyBaseIndex = 0;     // absolute index of historyRaw[0]
+  let selectionMore = false;
+  let selectionLoading = false;
+  let suppressLoadMore = false; // set while a search jump positions the view
+  let searchMatches = [];
+  let searchIndex = 0;
+  let searchTotal = 0;
+
+  const plainLine = line => line.replace(ANSI_RE, '');
+
+  /** tmux target for the window this tab is attached to: "tmux-2" -> "@2". */
+  function historyWindowArg() {
+    const match = /^tmux-([0-9]+)$/.exec(currentArg || '');
+    return match ? `@${match[1]}` : null;
   }
 
+  // ---- ANSI -> HTML -------------------------------------------------------
+  // The dialog shows captured output with its colours, so the SGR runs have to
+  // be turned into spans. Colours 0-15 come from the live xterm theme, so the
+  // dialog matches the terminal exactly; 16-255 use the standard xterm palette
+  // (the same values xterm itself renders for those indices).
+  const CUBE_LEVELS = [0, 95, 135, 175, 215, 255];
+  const toHex = n => n.toString(16).padStart(2, '0');
+
+  function palette256() {
+    const theme = term.options.theme || {};
+    const base = [theme.black, theme.red, theme.green, theme.yellow, theme.blue,
+      theme.magenta, theme.cyan, theme.white, theme.brightBlack, theme.brightRed,
+      theme.brightGreen, theme.brightYellow, theme.brightBlue, theme.brightMagenta,
+      theme.brightCyan, theme.brightWhite].map(c => c || '#000000');
+    for (const r of CUBE_LEVELS) {
+      for (const g of CUBE_LEVELS) {
+        for (const b of CUBE_LEVELS) base.push(`#${toHex(r)}${toHex(g)}${toHex(b)}`);
+      }
+    }
+    for (let i = 0; i < 24; i++) {
+      const v = 8 + i * 10;
+      base.push(`#${toHex(v)}${toHex(v)}${toHex(v)}`);
+    }
+    return base;
+  }
+
+  function escapeHtml(text) {
+    return text.replace(/[&<>]/g, ch => (ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : '&gt;'));
+  }
+
+  /** Palette + default colours. Built once per render batch: palette256()
+   *  generates 240 colour strings, and doing that per line cost ~1.2M strings
+   *  on a 5000-line history. */
+  function ansiContext() {
+    const theme = term.options.theme || {};
+    return {
+      palette: palette256(),
+      defaultFg: theme.foreground || null,
+      defaultBg: theme.background || null,
+    };
+  }
+
+  function renderAnsi(raw, context) {
+    const { palette, defaultFg, defaultBg } = context;
+    const out = [];
+    let fg = null, bg = null, bold = false, dim = false, underline = false, reverse = false;
+    let last = 0;
+    const emit = text => {
+      if (!text) return;
+      let useFg = reverse ? (bg || defaultBg) : fg;
+      let useBg = reverse ? (fg || defaultFg) : bg;
+      const style = [];
+      if (useFg) style.push(`color:${useFg}`);
+      if (useBg) style.push(`background-color:${useBg}`);
+      if (bold) style.push('font-weight:600');
+      if (underline) style.push('text-decoration:underline');
+      if (dim) style.push('opacity:.7');
+      const html = escapeHtml(text);
+      out.push(style.length ? `<span style="${style.join(';')}">${html}</span>` : html);
+    };
+    const sgr = params => {
+      const codes = params === '' ? [0] : params.split(';').map(n => parseInt(n, 10) || 0);
+      for (let i = 0; i < codes.length; i++) {
+        const code = codes[i];
+        if (code === 0) { fg = bg = null; bold = dim = underline = reverse = false; }
+        else if (code === 1) bold = true;
+        else if (code === 2) dim = true;
+        else if (code === 4) underline = true;
+        else if (code === 7) reverse = true;
+        else if (code === 22) { bold = false; dim = false; }
+        else if (code === 24) underline = false;
+        else if (code === 27) reverse = false;
+        else if (code >= 30 && code <= 37) fg = palette[code - 30];
+        else if (code === 39) fg = null;
+        else if (code >= 40 && code <= 47) bg = palette[code - 40];
+        else if (code === 49) bg = null;
+        else if (code >= 90 && code <= 97) fg = palette[code - 90 + 8];
+        else if (code >= 100 && code <= 107) bg = palette[code - 100 + 8];
+        else if (code === 38 || code === 48) {
+          const target = code === 38 ? 'fg' : 'bg';
+          const mode = codes[i + 1];
+          if (mode === 5) { const value = palette[codes[i + 2]] || null; if (target === 'fg') fg = value; else bg = value; i += 2; }
+          else if (mode === 2) {
+            const [r, g, b] = [codes[i + 2], codes[i + 3], codes[i + 4]];
+            const value = `#${toHex(r || 0)}${toHex(g || 0)}${toHex(b || 0)}`;
+            if (target === 'fg') fg = value; else bg = value;
+            i += 4;
+          }
+        }
+      }
+    };
+    ANSI_RE.lastIndex = 0;
+    let match;
+    while ((match = ANSI_RE.exec(raw))) {
+      emit(raw.slice(last, match.index));
+      sgr(match[1]);
+      last = ANSI_RE.lastIndex;
+    }
+    emit(raw.slice(last));
+    return out.join('');
+  }
+
+  function renderHistory() {
+    const previousHeight = selectionText.scrollHeight;
+    const context = ansiContext();
+    // one addressed element per line: search needs to find the mark on a
+    // specific absolute line, which plain text runs cannot express
+    selectionText.innerHTML = historyRaw
+      .map((line, i) => `<span class="line" data-line="${historyBaseIndex + i}">${renderAnsi(line, context)}</span>`)
+      .join('\n');
+    return previousHeight;
+  }
+
+  /** Fallback when no server history is available: what this tab has seen. */
+  function localSnapshotLines() {
+    const buffer = term.buffer.active;
+    const parts = [];
+    for (let row = 0; row < buffer.length; row++) {
+      const line = buffer.getLine(row);
+      if (!line) continue;
+      if (row > 0 && !line.isWrapped) parts.push('\n');
+      parts.push(line.translateToString(true));
+    }
+    return parts.join('').split('\n');
+  }
+
+  async function fetchHistory(offset) {
+    const window = historyWindowArg();
+    if (!window) return null;
+    try {
+      const res = await fetch(`/history?window=${encodeURIComponent(window)}&count=${HISTORY_CHUNK}&offset=${offset}&color=1`,
+        { cache: 'no-store' });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data && data.ok && Array.isArray(data.lines) ? data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function clearHighlights() {
+    for (const mark of selectionText.querySelectorAll('.match')) {
+      mark.replaceWith(document.createTextNode(mark.textContent));
+    }
+    selectionText.normalize();
+  }
+
+  function applyHighlights(query) {
+    clearHighlights();
+    if (!query) return;
+    const needle = query.toLowerCase();
+    const walker = document.createTreeWalker(selectionText, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const text = node.nodeValue;
+      const lower = text.toLowerCase();
+      let at = lower.indexOf(needle);
+      if (at === -1) continue;
+      const fragment = document.createDocumentFragment();
+      let done = 0;
+      while (at !== -1) {
+        if (at > done) fragment.appendChild(document.createTextNode(text.slice(done, at)));
+        const mark = document.createElement('span');
+        mark.className = 'match';
+        mark.textContent = text.slice(at, at + needle.length);
+        fragment.appendChild(mark);
+        done = at + needle.length;
+        at = lower.indexOf(needle, done);
+      }
+      if (done < text.length) fragment.appendChild(document.createTextNode(text.slice(done)));
+      node.parentNode.replaceChild(fragment, node);
+    }
+  }
+
+  function setCurrentMatch(element) {
+    for (const mark of selectionText.querySelectorAll('.match.current')) mark.classList.remove('current');
+    historyCount.textContent = searchMatches.length ? `${searchIndex + 1}/${searchMatches.length}` : '0/0';
+    if (!element) return;
+    element.classList.add('current');
+    // suppress the load-older trigger while the jump repositions the view
+    suppressLoadMore = true;
+    element.scrollIntoView({ block: 'center', inline: 'nearest' });
+    setTimeout(() => { suppressLoadMore = false; }, 400);
+  }
+
+  async function jumpToMatch(position) {
+    const match = searchMatches[position];
+    if (!match) return;
+    const window = historyWindowArg();
+    if (!window) return;
+    // centre the match in its page so there is context either side
+    const offset = Math.max(0, searchTotal - 1 - match.index - Math.floor(HISTORY_CHUNK / 2));
+    const page = await fetchHistory(offset);
+    if (!page) { selectionStatus.textContent = 'Could not load that match.'; return; }
+    historyRaw = page.lines;
+    historyBaseIndex = page.start;
+    selectionOffset = offset + page.lines.length;
+    selectionMore = !!page.more;
+    renderHistory();
+    applyHighlights(historyQuery.value.trim());
+    const line = selectionText.querySelector(`.line[data-line="${match.index}"]`);
+    setCurrentMatch(line ? line.querySelector('.match') : null);
+  }
+
+  async function openSelection() {
+    selectionStatus.textContent = '';
+    historyCount.textContent = '';
+    searchMatches = [];
+    searchIndex = 0;
+    selectionOffset = 0;
+    selectionMore = false;
+    selectionLoading = false;
+    selectionDialog.showModal();
+    const page = await fetchHistory(0);
+    if (!page) {
+      // No window (launcher menu) or the service is unreachable.
+      historyRaw = localSnapshotLines();
+      renderHistory();
+      selectionText.scrollTop = selectionText.scrollHeight;
+      return;
+    }
+    historyRaw = page.lines;
+    historyBaseIndex = page.start;
+    selectionOffset = page.lines.length;
+    selectionMore = !!page.more;
+    renderHistory();
+    selectionText.scrollTop = selectionText.scrollHeight;
+    if (!selectionMore) selectionStatus.textContent = 'Start of history.';
+  }
+
+  selectionText.addEventListener('scroll', async () => {
+    if (suppressLoadMore || selectionLoading || !selectionMore || selectionText.scrollTop > 0) return;
+    selectionLoading = true;
+    selectionStatus.textContent = 'Loading older output…';
+    const page = await fetchHistory(selectionOffset);
+    selectionLoading = false;
+    if (!page) {
+      selectionStatus.textContent = 'Could not load older output.';
+      return;
+    }
+    historyRaw = page.lines.concat(historyRaw);
+    historyBaseIndex = page.start;
+    const previousHeight = renderHistory();
+    // prepending shifts everything down by the height it added; undo that so
+    // the line being read stays put
+    selectionText.scrollTop = selectionText.scrollHeight - previousHeight;
+    selectionOffset += page.lines.length;
+    selectionMore = !!page.more;
+    applyHighlights(historyQuery.value.trim());
+    selectionStatus.textContent = selectionMore ? '' : 'Start of history.';
+  });
+
+  // ---- search ------------------------------------------------------------
+  let searchTimer = null;
+  async function runSearch() {
+    const query = historyQuery.value.trim();
+    const window = historyWindowArg();
+    if (!query || !window) {
+      clearHighlights();
+      searchMatches = [];
+      historyCount.textContent = '';
+      return;
+    }
+    historyCount.textContent = '…';
+    try {
+      const res = await fetch(`/history/search?window=${encodeURIComponent(window)}&q=${encodeURIComponent(query)}`,
+        { cache: 'no-store' });
+      const data = res.ok ? await res.json() : null;
+      if (!data || !data.ok) { historyCount.textContent = '—'; return; }
+      searchMatches = data.matches;
+      searchTotal = data.total;
+      searchIndex = 0;
+      historyCount.textContent = `${searchMatches.length}/${searchMatches.length}`;
+      if (!searchMatches.length) {
+        clearHighlights();
+        historyCount.textContent = '0/0';
+        selectionStatus.textContent = 'No matches in history.';
+        return;
+      }
+      selectionStatus.textContent = data.truncated ? 'Showing the newest matches only.' : '';
+      await jumpToMatch(0);
+    } catch {
+      historyCount.textContent = '—';
+    }
+  }
+
+  historyQuery.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 350);
+  });
+  historyQuery.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      clearTimeout(searchTimer);
+      if (searchMatches.length) {
+        searchIndex = (searchIndex + (event.shiftKey ? -1 : 1) + searchMatches.length) % searchMatches.length;
+        jumpToMatch(searchIndex);
+      } else {
+        runSearch();
+      }
+    }
+  });
+  document.getElementById('history-next').addEventListener('click', () => {
+    if (!searchMatches.length) { runSearch(); return; }
+    searchIndex = (searchIndex + 1) % searchMatches.length;
+    jumpToMatch(searchIndex);
+  });
+  document.getElementById('history-prev').addEventListener('click', () => {
+    if (!searchMatches.length) { runSearch(); return; }
+    searchIndex = (searchIndex - 1 + searchMatches.length) % searchMatches.length;
+    jumpToMatch(searchIndex);
+  });
+
   document.getElementById('select-all').addEventListener('click', () => {
-    selectionText.focus();
-    selectionText.select();
+    const range = document.createRange();
+    range.selectNodeContents(selectionText);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    selectionText.focus({ preventScroll: true });
   });
   document.getElementById('copy-selection').addEventListener('pointerdown', event => event.preventDefault());
   document.getElementById('copy-selection').addEventListener('click', async () => {
-    const start = selectionText.selectionStart;
-    const end = selectionText.selectionEnd;
-    if (start === end) {
-      selectionStatus.textContent = 'Long-press to select text, or tap Select all first.';
+    const selection = window.getSelection();
+    const hasSelection = !!selection && selection.rangeCount > 0 && !selection.isCollapsed;
+    // never trim: leading indentation and trailing newlines are part of what the
+    // user selected
+    const payload = hasSelection ? selection.toString() : historyRaw.map(plainLine).join('\n');
+    if (!payload) {
+      selectionStatus.textContent = 'Nothing to copy yet.';
       return;
     }
-    const text = selectionText.value.slice(start, end);
-    // The synchronous copy command retains the user gesture on plain HTTP.
-    selectionText.focus({ preventScroll: true });
-    selectionText.setSelectionRange(start, end);
-    let copied = false;
-    try { copied = document.execCommand('copy'); } catch {}
-    if (!copied && navigator.clipboard?.writeText) {
-      try { await navigator.clipboard.writeText(text); copied = true; } catch {}
+    let copied = await writeClipboard(payload);
+    if (!copied) {
+      // Synchronous fallback inside this gesture, carrying exactly the payload
+      // (the old version selected the whole history instead, then still claimed
+      // it had copied the selection).
+      const scratch = document.createElement('textarea');
+      scratch.value = payload;
+      scratch.setAttribute('readonly', '');
+      scratch.style.position = 'fixed';
+      scratch.style.top = '-1000px';
+      document.body.appendChild(scratch);
+      scratch.select();
+      try { copied = document.execCommand('copy'); } catch {}
+      scratch.remove();
     }
-    selectionStatus.textContent = copied ? 'Copied selected text.' : 'Use Copy in your phone’s native selection menu.';
+    selectionStatus.textContent = copied
+      ? (hasSelection ? 'Copied selection.' : `Copied ${historyRaw.length} lines.`)
+      : 'Copy was denied — select the text and use your browser menu.';
   });
+
   document.getElementById('close-selection').addEventListener('click', () => selectionDialog.close());
   selectionDialog.addEventListener('close', () => {
-    selectionText.value = '';
+    selectionText.innerHTML = '';
+    historyRaw = [];
+    selectionOffset = 0;
+    selectionMore = false;
+    selectionLoading = false;
+    searchMatches = [];
+    historyCount.textContent = '';
     focusTerminal();
   });
+
+  const NON_REPEATING_KEYS = new Set(['select', 'paste', 'attach', 'prefix', 'detach']);
+
+  function executeKey(key) {
+    if (key === 'paste') { pasteClipboard(); return; }
+    if (key === 'select') { openSelection(); return; }
+    if (key === 'attach') { openFilePicker(); return; }
+    if (key === 'zoom-in') { adjustFontSize(1); return; }
+    if (key === 'zoom-out') { adjustFontSize(-1); return; }
+    if (key === 'prefix') {
+      const armed = !prefixArmed;
+      if (sendInput('\x01', true)) setPrefix(armed);
+    } else if (key === 'detach') {
+      sendInput(prefixArmed ? 'd' : '\x01d', true);
+    } else {
+      // Arrows are plain escape sequences and work inside copy-mode as well:
+      // measured against #{pane_in_mode}, a keybar Up with no client-side mode
+      // tracked still resolves to tmux's named Up and moves the copy cursor
+      // (mode=1, scroll 1 -> 2). The removed Scroll button sent vi k/j here.
+      const arrows = { up: 'A', down: 'B', right: 'C', left: 'D' };
+      const keys = { escape: '\x1b', enter: '\r', backspace: '\x7f', tab: '\t', interrupt: '\x03', eof: '\x04', clear: '\x0c' };
+      // Always SS3 (application form). Both termininfo entries in this stack
+      // declare it - the client's TERM=xterm-256color and the pane's
+      // tmux-256color all say kcuu1=\EOA - and tmux parses client input against
+      // the former. Measured: a CSI up (0x1b 5b 41) is passed through untouched
+      // and types "[A" at the shell prompt, while SS3 recalls the history entry.
+      // The old conditional sent CSI whenever DECCKM was off.
+      const data = arrows[key] ? `\x1bO${arrows[key]}`
+        : keys[key];
+      sendInput(data, true);
+    }
+    focusTerminal();
+  }
+
+  let activeKeyButton = null;
+  let activePointerId = null;
+  let keyStartX = 0;
+  let keyStartY = 0;
+  let keyRepeatTimer = null;
+  let keyRepeatInterval = null;
+  let keyFiredCount = 0;
+  let lastPointerHandledTime = 0;
+
+  function stopKeyRepeat() {
+    clearTimeout(keyRepeatTimer);
+    clearInterval(keyRepeatInterval);
+    keyRepeatTimer = null;
+    keyRepeatInterval = null;
+    if (activeKeyButton) {
+      activeKeyButton.classList.remove('key-active');
+      activeKeyButton = null;
+    }
+    activePointerId = null;
+    keyFiredCount = 0;
+  }
 
   // Cancel focus transfer, not the click: tapping a terminal key keeps the
   // actual xterm textarea (and the phone keyboard) focused.
   keybar.addEventListener('pointerdown', event => {
-    if (event.target.closest('button')) event.preventDefault();
-  });
-  keybar.addEventListener('click', event => {
     const button = event.target.closest('button[data-key]');
     if (!button || button.disabled) return;
+    event.preventDefault();
+
+    stopKeyRepeat();
+
     const key = button.dataset.key;
-    if (key === 'paste') { pasteClipboard(); return; }
-    if (key === 'select') { openSelection(); return; }
-    if (key === 'prefix') {
-      const armed = !prefixArmed;
-      if (sendInput('\x01')) setPrefix(armed);
-    } else if (key === 'detach') {
-      sendInput(prefixArmed ? 'd' : '\x01d');
+    activeKeyButton = button;
+    activePointerId = event.pointerId;
+    keyStartX = event.clientX;
+    keyStartY = event.clientY;
+    keyFiredCount = 0;
+    button.classList.add('key-active');
+
+    const isMouse = event.pointerType === 'mouse';
+    const isRepeatable = !NON_REPEATING_KEYS.has(key);
+
+    if (isMouse) {
+      executeKey(key);
+      lastPointerHandledTime = Date.now();
+      keyFiredCount++;
+      if (isRepeatable) {
+        keyRepeatTimer = setTimeout(() => {
+          keyRepeatInterval = setInterval(() => {
+            executeKey(key);
+            lastPointerHandledTime = Date.now();
+            keyFiredCount++;
+          }, 60);
+        }, 350);
+      }
     } else {
-      const arrows = { up: 'A', down: 'B', right: 'C', left: 'D' };
-      const keys = { escape: '\x1b', tab: '\t', interrupt: '\x03', eof: '\x04', clear: '\x0c' };
-      sendInput(arrows[key] ? `\x1b${term.modes.applicationCursorKeysMode ? 'O' : '['}${arrows[key]}` : keys[key]);
+      // Touch/pen: delay first repeat to allow horizontal toolbar scrolling.
+      // If held for 300ms without moving > 8px, start auto-repeat:
+      if (isRepeatable) {
+        keyRepeatTimer = setTimeout(() => {
+          executeKey(key);
+          lastPointerHandledTime = Date.now();
+          keyFiredCount++;
+          keyRepeatInterval = setInterval(() => {
+            executeKey(key);
+            lastPointerHandledTime = Date.now();
+            keyFiredCount++;
+          }, 60);
+        }, 300);
+      }
     }
-    focusTerminal();
+  });
+
+  window.addEventListener('pointermove', event => {
+    if (activePointerId === null || event.pointerId !== activePointerId) return;
+    const distance = Math.hypot(event.clientX - keyStartX, event.clientY - keyStartY);
+    if (distance > 8) stopKeyRepeat();
+  });
+
+  window.addEventListener('pointerup', event => {
+    if (activePointerId === null || event.pointerId !== activePointerId) return;
+    const button = activeKeyButton;
+    const key = button?.dataset.key;
+    const fired = keyFiredCount;
+    stopKeyRepeat();
+
+    if (button && fired === 0 && !button.disabled) {
+      executeKey(key);
+      lastPointerHandledTime = Date.now();
+    }
+  });
+
+  window.addEventListener('pointercancel', event => {
+    if (event.pointerId === activePointerId) {
+      stopKeyRepeat();
+    }
+  });
+
+  window.addEventListener('blur', stopKeyRepeat);
+
+  keybar.addEventListener('contextmenu', event => {
+    if (event.target.closest('button')) event.preventDefault();
+  });
+
+  keybar.addEventListener('click', event => {
+    event.preventDefault();
+    if (Date.now() - lastPointerHandledTime < 500) return;
+    const button = event.target.closest('button[data-key]');
+    if (!button || button.disabled) return;
+    executeKey(button.dataset.key);
   });
 
   function lineHeight() {
@@ -680,16 +1256,60 @@
     return screen.clientHeight / term.rows || term.options.fontSize * term.options.lineHeight;
   }
 
+  const SCROLL_SPEED = 3;
+  // A desktop wheel notch used to emit SCROLL_SPEED (3) reports, and each report
+  // scrolls 3 lines inside copy-mode (tmux.conf), so one notch jumped 9 lines -
+  // measured 9/364 -> 18/364 history. A wheel event now emits one report, i.e.
+  // 3 lines per notch like a normal terminal. The touch path keeps SCROLL_SPEED,
+  // so phone swipe distance is unchanged.
+  const WHEEL_REPORTS = 1;
+  // One SGR report scrolls one line now that tmux.conf's wheel bindings use
+  // `-N 1`, so the touch multiplier is 3x its old value to keep a swipe's
+  // distance identical: reports per row x lines per report is unchanged at 4.5.
+  const TOUCH_REPORTS_PER_ROW = 4.5;
+  /** Terminal cell (1-based) under a client-space point, clamped in range. */
+  function cellAt(clientX, clientY) {
+    const screen = term.element.querySelector('.xterm-screen');
+    const rect = screen.getBoundingClientRect();
+    const cellWidth = rect.width / term.cols || 1;
+    const cellHeight = rect.height / term.rows || 1;
+    return {
+      x: Math.min(term.cols, Math.max(1, Math.floor((clientX - rect.left) / cellWidth) + 1)),
+      y: Math.min(term.rows, Math.max(1, Math.floor((clientY - rect.top) / cellHeight) + 1)),
+    };
+  }
+
+  // History scrolling - for the wheel, a trackpad, a touch swipe or an iPad
+  // trackpad - is done by emitting SGR (1006) wheel reports straight into the
+  // input stream. Deliberately NOT by synthesizing DOM WheelEvents and letting
+  // xterm forward them: xterm only forwards wheels to the app in some mouse
+  // modes, and in tmux's usual 'drag' (1002) mode it forwards none (measured 0
+  // bytes), so that path silently did nothing on every surface. tmux parses
+  // mouse sequences from the client stream regardless of mode.
+  // Button 64 = wheel up (older history), 65 = wheel down; a downward finger
+  // drag and a downward wheel both reveal older content.
+  function sendScrollReports(lines, source) {
+    const count = Math.min(15, Math.abs(lines));
+    const { x, y } = cellAt(source.clientX, source.clientY);
+    const button = lines > 0 ? 65 : 64;
+    sendInput(`\x1b[<${button};${x};${y}M`.repeat(count), true);
+  }
+
   let wheelRemainder = 0;
   term.attachCustomWheelEventHandler(event => {
-    if (event.ctrlKey) return false; // Browser pinch/trackpad zoom remains native.
-    if (term.modes.mouseTrackingMode !== 'none') return true;
-    // xterm's alternate-scroll fallback sends cursor keys. Scrolling here must
-    // never rotate the command history, even in an alternate-screen TUI.
+    if (event.ctrlKey) return false; // trackpad pinch / Ctrl+wheel stays browser zoom
+    if (term.modes.mouseTrackingMode !== 'none') {
+      sendScrollReports(Math.sign(event.deltaY) * WHEEL_REPORTS, event);
+      event.preventDefault();
+      return false;
+    }
+    // No mouse reporting (e.g. the launcher menu): scroll xterm's own buffer.
+    // xterm's alternate-scroll fallback would send cursor keys instead, which
+    // must never rotate the shell's command history.
     const amount = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY
       : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? event.deltaY * term.rows
         : event.deltaY / lineHeight();
-    wheelRemainder += amount;
+    wheelRemainder += amount * SCROLL_SPEED;
     const lines = Math.trunc(wheelRemainder);
     wheelRemainder -= lines;
     if (lines) term.scrollLines(lines);
@@ -702,6 +1322,32 @@
   let multitouch = false;
   let suppressMouseUntil = 0;
   let touchRemainder = 0;
+
+  // A click must not count as a drag. Real mice jitter a pixel or two between
+  // press and release, and xterm reports every motion as a mouse drag - so tmux
+  // saw MouseDrag1Pane and began a selection on an ordinary click (measured:
+  // a 2px jitter gave sel_active=1). Because scrolling moves copy-mode's
+  // cursor, the next scroll then extended that selection one line per notch:
+  // "it selects all the text on the way". Suppress motion reports until the
+  // pointer has genuinely moved, mirroring the touch bridge's 8px threshold.
+  // Registered on window in the capture phase so it runs before xterm's own
+  // document-level drag tracking.
+  const MOUSE_DRAG_THRESHOLD = 4;
+  let mousePress = null;
+  surface.addEventListener('mousedown', event => {
+    mousePress = event.button === 0 ? { x: event.clientX, y: event.clientY, moved: false } : null;
+  }, true);
+  window.addEventListener('mousemove', event => {
+    if (!mousePress || mousePress.moved) return;
+    const distance = Math.hypot(event.clientX - mousePress.x, event.clientY - mousePress.y);
+    if (distance < MOUSE_DRAG_THRESHOLD) {
+      event.stopImmediatePropagation();
+      return;
+    }
+    mousePress.moved = true;
+  }, true);
+  window.addEventListener('mouseup', () => { mousePress = null; }, true);
+
 
   // xterm's native TouchEvent handlers would also scroll the viewport. Keep
   // the browser's default pinch gesture but let this pointer bridge own swipes.
@@ -731,16 +1377,13 @@
     if (!touch.moved && Math.hypot(event.clientX - touch.x, event.clientY - touch.y) < 8) return;
     touch.moved = true;
     suppressMouseUntil = Date.now() + 800;
-    touchRemainder += (touch.lastY - event.clientY) / lineHeight();
+    touchRemainder += (touch.lastY - event.clientY) / lineHeight() * (term.modes.mouseTrackingMode !== 'none' ? TOUCH_REPORTS_PER_ROW : SCROLL_SPEED);
     touch.lastY = event.clientY;
     const lines = Math.trunc(touchRemainder);
     if (!lines) return;
     touchRemainder -= lines;
     if (term.modes.mouseTrackingMode !== 'none') {
-      surface.querySelector('.xterm-viewport').dispatchEvent(new WheelEvent('wheel', {
-        bubbles: true, cancelable: true, deltaMode: WheelEvent.DOM_DELTA_LINE, deltaY: lines,
-        clientX: event.clientX, clientY: event.clientY,
-      }));
+      sendScrollReports(lines, event);
     } else {
       term.scrollLines(lines);
     }
@@ -751,7 +1394,7 @@
     if (!touch) return;
     const cancelled = event.type !== 'pointerup';
     if (touch.moved || multitouch || cancelled) suppressMouseUntil = Date.now() + 800;
-    else focusTerminal();
+    else focusTerminal(true);
     touches.delete(event.pointerId);
     if (surface.hasPointerCapture(event.pointerId)) surface.releasePointerCapture(event.pointerId);
     if (!touches.size) multitouch = false;

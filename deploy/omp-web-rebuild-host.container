@@ -2,20 +2,21 @@
 # Production upstream for omp.jieniuu8.com; host Caddy enforces tailnet access.
 [Unit]
 Description=Host-connected omp web terminal
-After=default.target
+Requires=omp-web-tmux.service
+After=omp-web-tmux.service
 
 [Container]
 ContainerName=omp-web-rebuild-host
-Image=localhost/omp-web-rebuild:18.3.2-7
+Image=localhost/omp-web-rebuild:18.3.2-43
 PublishPort=127.0.0.1:17688:8080
 Volume=%h:/home/jieniu
-Volume=/tmp/tmux-1000:/tmp/tmux-0
 Volume=%t/systemd:/run/user/1000/systemd
 Volume=%t/bus:/run/user/1000/bus
 Volume=/etc/localtime:/etc/localtime:ro
 Environment=HOME=/home/jieniu
 Environment=OMP_WEB_ROOT=/home/jieniu/.containers/omp-web-rebuild
-Environment=OMP_TMUX_SOCKET=/tmp/tmux-0/default
+Environment=OMP_TMUX_SOCKET=/home/jieniu/.omp/run/host-tmux/default
+Environment=OMP_TMUX_REQUIRE_SERVER=1
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 WorkingDir=/home/jieniu

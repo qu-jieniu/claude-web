@@ -14,11 +14,11 @@ def main():
     parser.add_argument('--root', default=os.environ.get('OMP_WEB_ROOT', '/opt/omp-web'))
     parser.add_argument('--http-port', type=int, default=os.environ.get('OMP_HTTP_PORT', '8080'))
     parser.add_argument('--terminal-port', type=int, default=os.environ.get('OMP_TERMINAL_PORT', '7682'))
-    parser.add_argument('--composer-port', type=int, default=os.environ.get('OMP_COMPOSER_PORT', '7683'))
+    parser.add_argument('--upload-port', type=int, default=os.environ.get('OMP_UPLOAD_PORT', '7684'))
     parser.add_argument('--bind', choices=('127.0.0.1', '0.0.0.0'),
                         default=os.environ.get('OMP_BIND_ADDRESS', '127.0.0.1'))
     args = parser.parse_args()
-    for port in (args.http_port, args.terminal_port, args.composer_port):
+    for port in (args.http_port, args.terminal_port, args.upload_port):
         if not 1 <= port <= 65535:
             parser.error('ports must be between 1 and 65535')
     root = Path(args.root).resolve()
@@ -31,7 +31,7 @@ def main():
         'OMP_WEB_ROOT': str(root),
         'OMP_HTTP_PORT': str(args.http_port),
         'OMP_TERMINAL_PORT': str(args.terminal_port),
-        'OMP_COMPOSER_PORT': str(args.composer_port),
+        'OMP_UPLOAD_PORT': str(args.upload_port),
         'OMP_BIND_ADDRESS': args.bind,
         'LANG': 'C.UTF-8',
         'LC_ALL': 'C.UTF-8',
@@ -49,7 +49,9 @@ def main():
     result = 0
     try:
         children.append(subprocess.Popen([
-            sys.executable, str(root / 'omp-web-composer'), '--port', str(args.composer_port),
+            sys.executable, str(root / 'omp-web-upload'),
+            '--port', str(args.upload_port),
+            '--bind', '127.0.0.1',
         ], start_new_session=True))
         children.append(subprocess.Popen([
             'ttyd', '-i', args.bind, '-p', str(args.terminal_port),

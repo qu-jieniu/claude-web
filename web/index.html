@@ -3,12 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="theme-color" content="#11151b">
+  <meta name="theme-color" content="#161a21">
   <title>omp terminal</title>
   <link rel="stylesheet" href="/vendor/xterm.css">
   <link rel="stylesheet" href="/style.css">
   <script defer src="/vendor/xterm.js"></script>
   <script defer src="/vendor/addon-fit.js"></script>
+  <script defer src="/vendor/addon-canvas.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body>
@@ -18,16 +19,13 @@
       <button id="reconnect" type="button" aria-label="Reconnect to the current terminal session">Reconnect</button>
     </header>
     <div id="terminal" aria-label="Interactive terminal"></div>
-    <section id="composer" aria-label="Compose a prompt" hidden>
-      <label for="composer-text">Prompt <span class="composer-hint">· Enter adds a line</span></label>
-      <p id="composer-origin"></p>
-      <textarea id="composer-text" rows="4" placeholder="Write locally, then send to OMP" aria-describedby="composer-origin composer-status"></textarea>
-      <p id="composer-status" role="status" aria-live="polite" aria-atomic="true"></p>
+    <section id="composer" aria-label="Compose terminal input" hidden>
+      <textarea id="composer-text" rows="2" aria-label="Text to paste" placeholder="Paste text into the terminal · no added Enter" aria-describedby="composer-status"></textarea>
+      <p id="composer-status" role="status" aria-live="polite" aria-atomic="true" hidden></p>
       <div class="composer-actions">
         <button id="composer-clear" type="button" aria-label="Clear draft">Clear</button>
-        <button id="composer-target" type="button" aria-label="Retarget draft to current session">Retarget</button>
-        <button id="composer-check" type="button" aria-label="Check session readiness">Check</button>
-        <button id="composer-send" type="button" disabled>Send to OMP</button>
+        <button id="composer-attach" type="button" aria-label="Attach file or photo">Attach</button>
+        <button id="composer-paste" type="button" disabled>Paste</button>
       </div>
     </section>
     <div id="terminal-tools">
@@ -35,7 +33,10 @@
     <nav id="keybar" aria-label="Terminal keys">
       <button type="button" data-key="select" aria-label="Select terminal text">Select</button>
       <button type="button" data-key="paste" aria-label="Paste clipboard into the terminal">Paste</button>
+      <button type="button" data-key="attach" aria-label="Attach file or photo">Attach</button>
       <button type="button" data-key="escape" aria-label="Escape">Esc</button>
+      <button type="button" data-key="enter" aria-label="Enter">Enter</button>
+      <button type="button" data-key="backspace" aria-label="Backspace, delete">⌫</button>
       <button type="button" data-key="interrupt" aria-label="Control C, interrupt">^C</button>
       <button type="button" data-key="tab" aria-label="Tab">Tab</button>
       <button type="button" data-key="up" aria-label="Arrow up">↑</button>
@@ -44,12 +45,16 @@
       <button type="button" data-key="right" aria-label="Arrow right">→</button>
       <button id="prefix" type="button" data-key="prefix" aria-label="Control A, multiplexer prefix" aria-pressed="false">^A</button>
       <button type="button" data-key="clear" aria-label="Control L, redraw">^L</button>
+      <button type="button" data-key="zoom-out" aria-label="Zoom out terminal font">A−</button>
+      <button type="button" data-key="zoom-in" aria-label="Zoom in terminal font">A+</button>
       <button type="button" data-key="detach" aria-label="Detach from the multiplexer session">Detach</button>
       <button type="button" data-key="eof" aria-label="Control D, end of input">^D</button>
     </nav>
     </div>
+    <input type="file" id="file-uploader" style="display: none;" multiple>
     <aside id="notice" role="status" aria-live="polite" aria-atomic="true" hidden>
       <span id="notice-text"></span>
+      <button id="notice-copy" type="button" hidden>Copy</button>
       <button id="dismiss-notice" type="button" aria-label="Dismiss notice">Dismiss</button>
     </aside>
   </main>
@@ -67,9 +72,15 @@
   </dialog>
   <dialog id="selection-dialog" aria-labelledby="selection-title">
     <h1 id="selection-title">Select terminal text</h1>
-    <p>Frozen copy of the visible terminal. Long-press a word, then drag the selection handles. To copy older text, close this and scroll the terminal first.</p>
-    <label for="selection-text">Terminal snapshot</label>
-    <textarea id="selection-text" readonly spellcheck="false" rows="12"></textarea>
+    <p>Full terminal history, with colour. Drag to select; scroll up to load older output; lines scroll sideways rather than wrapping.</p>
+    <div class="history-search">
+      <input id="history-query" type="search" placeholder="Search all history" aria-label="Search terminal history" spellcheck="false" autocapitalize="off" autocomplete="off">
+      <button id="history-prev" type="button" aria-label="Previous match">&#8593;</button>
+      <button id="history-next" type="button" aria-label="Next match">&#8595;</button>
+      <span id="history-count" role="status" aria-live="polite"></span>
+    </div>
+    <label for="selection-text">Terminal history</label>
+    <pre id="selection-text" tabindex="0" aria-label="Terminal history"></pre>
     <p id="selection-status" role="status" aria-live="polite"></p>
     <div class="dialog-actions">
       <button id="select-all" type="button">Select all</button>
