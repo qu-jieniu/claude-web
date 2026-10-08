@@ -150,8 +150,28 @@
   function showNotice(message, copyText = null) {
     noticeText.textContent = message;
     pendingClipboard = copyText;
+    pendingClipboardAt = Date.now();
     noticeCopy.hidden = !copyText;
     notice.hidden = false;
+  }
+
+  /** Put text on the clipboard inside a live user gesture. Returns true on
+   *  success. The synchronous command runs first: WebKit only honours a gesture
+   *  within the task that started it, and a real clipboard rejection from Safari
+   *  arrives in a later task, so a fallback placed after an await has no gesture
+   *  left and fails as well. */
+  function copyInGesture(text) {
+    const scratch = document.createElement('textarea');
+    scratch.value = text;
+    scratch.setAttribute('readonly', '');
+    scratch.style.position = 'fixed';
+    scratch.style.top = '-1000px';
+    document.body.appendChild(scratch);
+    scratch.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch {}
+    scratch.remove();
+    return copied;
   }
 
   /** Put text on the clipboard. Returns true on success. */
@@ -165,24 +185,8 @@
   noticeCopy.addEventListener('click', async () => {
     const text = pendingClipboard;
     if (!text) return;
-    if (await writeClipboard(text)) {
-      pendingClipboard = null;
-      noticeCopy.hidden = true;
-      noticeText.textContent = 'Copied to clipboard.';
-      return;
-    }
-    // Last resort: a real selection plus the synchronous command, which is
-    // still inside this click's user gesture.
-    const scratch = document.createElement('textarea');
-    scratch.value = text;
-    scratch.setAttribute('readonly', '');
-    scratch.style.position = 'fixed';
-    scratch.style.top = '-1000px';
-    document.body.appendChild(scratch);
-    scratch.select();
-    let copied = false;
-    try { copied = document.execCommand('copy'); } catch {}
-    scratch.remove();
+    // Synchronous first, while this click's gesture is guaranteed to be live.
+    let copied = copyInGesture(text) || await writeClipboard(text);
     if (copied) {
       pendingClipboard = null;
       noticeCopy.hidden = true;
@@ -190,6 +194,29 @@
     } else {
       noticeText.textContent = 'Copy was refused by the browser. Select the text and copy it manually.';
     }
+  });
+
+  // tmux copies on its own, so no gesture backs the OSC 52 write and browsers
+  // refuse it - hence the notice. A Mac user's reflex after selecting is
+  // Command-C, and the copy event *is* a gesture whose clipboardData accepts a
+  // write, so honour that. Gated to Apple platforms: elsewhere Ctrl-C is the
+  // terminal's interrupt and must reach the pty untouched.
+  const applePlatform = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+  let pendingClipboardAt = 0;
+  document.addEventListener('copy', event => {
+    if (!applePlatform || !pendingClipboard) return;
+    if (Date.now() - pendingClipboardAt > 120000) { pendingClipboard = null; return; }
+    const selection = window.getSelection();
+    const hasDomSelection = !!selection && selection.rangeCount > 0 && !selection.isCollapsed;
+    const active = document.activeElement;
+    const hasInputSelection = (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement)
+      && active.selectionStart !== active.selectionEnd;
+    if (hasDomSelection || hasInputSelection) return;   // the browser's own copy wins
+    event.clipboardData?.setData('text/plain', pendingClipboard);
+    event.preventDefault();
+    pendingClipboard = null;
+    noticeCopy.hidden = true;
+    noticeText.textContent = 'Copied to clipboard.';
   });
 
   document.getElementById('dismiss-notice').addEventListener('click', () => {
@@ -1074,21 +1101,8 @@
       selectionStatus.textContent = 'Nothing to copy yet.';
       return;
     }
-    let copied = await writeClipboard(payload);
-    if (!copied) {
-      // Synchronous fallback inside this gesture, carrying exactly the payload
-      // (the old version selected the whole history instead, then still claimed
-      // it had copied the selection).
-      const scratch = document.createElement('textarea');
-      scratch.value = payload;
-      scratch.setAttribute('readonly', '');
-      scratch.style.position = 'fixed';
-      scratch.style.top = '-1000px';
-      document.body.appendChild(scratch);
-      scratch.select();
-      try { copied = document.execCommand('copy'); } catch {}
-      scratch.remove();
-    }
+    // Synchronous first, carrying exactly the payload the user selected.
+    const copied = copyInGesture(payload) || await writeClipboard(payload);
     selectionStatus.textContent = copied
       ? (hasSelection ? 'Copied selection.' : `Copied ${historyRaw.length} lines.`)
       : 'Copy was denied — select the text and use your browser menu.';

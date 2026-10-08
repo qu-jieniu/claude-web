@@ -9,7 +9,7 @@ home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-43` and attaches to
+**Active persistent deployment:** production runs `18.3.2-44` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -41,11 +41,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-43 .
+podman build -t localhost/omp-web-rebuild:18.3.2-44 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-43
+  localhost/omp-web-rebuild:18.3.2-44
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -1980,3 +1980,32 @@ Applied to `tmux.conf` and to the running host server (`tmux source-file`), so
 native clients attached to that server inherit the slower rate too. Verified
 after deploy: keybar arrows still recall history, and all eight pre-existing pane
 PIDs unchanged. Image `18.3.2-43`.
+
+### Copy in Safari: gesture-safe ordering, and Command-C (`18.3.2-44`, frontend)
+
+Reported: selected text could not be copied in Safari. Both copy paths tried
+`navigator.clipboard.writeText` first and only fell back to the synchronous
+`document.execCommand('copy')` after awaiting that promise. WebKit honours a user
+gesture only inside the task that started it, and Safari's clipboard rejection
+arrives in a *later* task, so the fallback ran with no gesture left and failed as
+well - the one path that works was disabled by the await. The synchronous command
+now runs first (`copyInGesture`), inside the click's guaranteed gesture, with the
+async API as the fallback. Measured with the async API stubbed to refuse in a
+later task: both the notice's Copy button and the Select dialog's Copy button
+succeed through the synchronous path and never touch the async one
+(`execCommand:copy -> true`, one async attempt, the OSC 52 one).
+
+Command-C after a tmux copy also did nothing, which is what a Mac user tries
+first: tmux copies on its own, so the OSC 52 write has no gesture and the browser
+refuses it (the notice covers that, but only if its button is pressed). A `copy`
+listener now honours that gesture - `clipboardData.setData` in a copy event needs
+no permission - when a refused tmux copy is pending, no DOM selection exists, and
+the pending copy is under two minutes old. Verified with a synthetic copy event:
+`text/plain` receives the tmux text and the event is cancelled, while a real
+selection is left to the browser. Gated to Apple platforms, since elsewhere
+Ctrl-C is the terminal's interrupt; measured on a Linux user agent that the gate
+is inert and that Ctrl-C still reaches the pty (`^C` twice in the pane).
+
+Safari itself could not be exercised here - there is no Safari on this host - so
+the failure mode was reproduced against WebKit's documented per-task gesture
+rule, not in Safari. Image `18.3.2-44`, deployed to `omp-web-rebuild-host.service`.
