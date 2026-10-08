@@ -745,10 +745,10 @@
 
   composerAttach.addEventListener('click', openFilePicker);
 
-  fileUploader.addEventListener('change', async () => {
-    const files = Array.from(fileUploader.files || []);
-    if (!files.length) return;
-
+  /** Upload files and insert their @paths into the composer or the terminal -
+   *  the shared tail of Attach and of pasting an image from the clipboard. */
+  async function uploadFiles(files) {
+    if (!files.length || uploading) return;
     uploading = true;
     renderComposer();
     const count = files.length;
@@ -799,10 +799,37 @@
       showNotice(`Upload failed: ${err.message}`);
     } finally {
       uploading = false;
-      fileUploader.value = '';
       renderComposer();
     }
+  }
+
+  fileUploader.addEventListener('change', () => {
+    const files = Array.from(fileUploader.files || []);
+    fileUploader.value = '';
+    uploadFiles(files);
   });
+
+  /** The first image on the clipboard as a File, or null - also when the browser
+   *  refuses clipboard.read() (it needs the clipboard-read permission). */
+  async function readClipboardImage() {
+    if (!navigator.clipboard?.read) return null;
+    let items;
+    try {
+      items = await navigator.clipboard.read();
+    } catch {
+      return null;
+    }
+    for (const item of items) {
+      const type = item.types?.find(candidate => candidate.startsWith('image/'));
+      if (!type) continue;
+      try {
+        const blob = await item.getType(type);
+        const extension = type === 'image/jpeg' ? 'jpg' : (type.split('/')[1] || 'png');
+        return new File([blob], `clipboard.${extension}`, { type });
+      } catch {}
+    }
+    return null;
+  }
 
   function openPasteDialog() {
     if (pasteDialog.open || leaving) return;
@@ -820,8 +847,20 @@
         showNotice('The connection changed. Paste again when your session is connected.');
         return;
       }
-      pasteToTerminal(text);
-      focusTerminal();
+      if (text) {
+        pasteToTerminal(text);
+        focusTerminal();
+        return;
+      }
+      // No text: the clipboard may hold an image instead (a screenshot, a copied
+      // picture). Upload it exactly like Attach - a terminal has nowhere to put
+      // pixels, and omp takes a path it can open.
+      const image = await readClipboardImage();
+      if (image) {
+        await uploadFiles([image]);
+        return;
+      }
+      showNotice('Nothing to paste: the clipboard holds no text or image. Use Attach for a file.');
     } catch {
       if (!leaving) openPasteDialog();
     }

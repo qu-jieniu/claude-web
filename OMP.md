@@ -9,7 +9,7 @@ home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-48` and attaches to
+**Active persistent deployment:** production runs `18.3.2-49` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -41,11 +41,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-48 .
+podman build -t localhost/omp-web-rebuild:18.3.2-49 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-48
+  localhost/omp-web-rebuild:18.3.2-49
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2116,3 +2116,22 @@ one). In the browser on a session with three windows: the bar lists all twelve,
 tapping `bartest:2 three` moves tmux's active window to three and the client
 follows (the pane's `I-AM-WINDOW-THREE` marker fills the screen), and tmux's own
 status row is gone. Image `18.3.2-48`.
+
+### Paste handles an image on the clipboard (`18.3.2-49`, frontend)
+
+The Paste button read only `readText()`, so a clipboard holding an image (a
+screenshot, a copied picture) pasted nothing and the user had to reach for
+Attach. Paste now falls through to `navigator.clipboard.read()` when there is no
+text: the first `image/*` item becomes a File and goes through the same
+upload-and-insert path as Attach, so omp receives `@/home/jieniu/.omp/uploads/…`
+and can open it. Text still wins when both are present - a clipboard copied from
+a page carries both, and a terminal expects the text there. A clipboard with
+neither now says so instead of silently doing nothing.
+
+The upload tail was extracted into `uploadFiles(files)`, shared by the file
+picker and the clipboard path.
+
+Verified with a real `ClipboardItem`: a 172-byte PNG on the clipboard was
+uploaded byte-identically (matching SHA-256) and its `@path` was inserted into
+the terminal; text still pastes as text; an empty clipboard shows the notice.
+Image `18.3.2-49`.
