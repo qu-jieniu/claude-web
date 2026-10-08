@@ -9,7 +9,7 @@ home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-46` and attaches to
+**Active persistent deployment:** production runs `18.3.2-47` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -41,11 +41,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-46 .
+podman build -t localhost/omp-web-rebuild:18.3.2-47 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-46
+  localhost/omp-web-rebuild:18.3.2-47
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2053,3 +2053,37 @@ Command-C does the same under a macOS user agent and stays inert under a Linux
 one; the dialog's Copy flashes it alongside "Copied 33 lines.". A screenshot of
 the pill was captured for the visual check. Image `18.3.2-46`, deployed to
 `omp-web-rebuild-host.service`.
+
+### Inline images render instead of a blank block (`18.3.2-47`)
+
+omp supports three terminal graphics protocols (Kitty `ESC _ G`, iTerm2
+`ESC ] 1337;File=`, SIXEL `ESC P q`) and, once it decides the terminal has one,
+reserves rows for an image and emits it. This terminal rendered none of them, so
+the reservation arrived as the large blank block.
+
+Two layers were missing:
+
+- **The client**: xterm.js has no image support of its own. `@xterm/addon-image`
+  (SIXEL + iTerm2 IIP) is vendored and loaded after the canvas renderer.
+- **tmux**: `allow-passthrough` was unset, and tmux 3.3+ defaults it *off*, so it
+  discarded the DCS passthrough envelope an application must wrap graphics in.
+  It is now `on` in `tmux.conf` and applied to the running server. Tradeoff,
+  noted in the file: a program in a pane can then emit sequences straight to the
+  browser terminal - acceptable for a single-user terminal, and required for
+  images at all.
+
+omp additionally gates SIXEL emission on two variables
+(`PI_FORCE_IMAGE_PROTOCOL=sixel`, `PI_ALLOW_SIXEL_PASSTHROUGH=1`), so the
+launcher passes both to every window it creates. It passes them with tmux `-e`
+rather than through its own environment, because panes inherit the *server's*
+environment and not the creating client's - measured: a launcher-created pane
+showed the server's `TERM` while the launcher sets `xterm-256color`. `os.environ`
+still wins, so an operator can pin another protocol or switch images off without
+editing the launcher.
+
+Verified: `tmux new-window -e ...` puts both variables into the pane's
+`/proc/<pid>/environ`; a 96x72 SIXEL emitted through the real path renders as a
+red/blue image in the browser (`.xterm-image-layer` present, screenshot
+captured) where the same sequence produced nothing before. The addon renders
+SIXEL and iTerm2, not Kitty, so forcing SIXEL keeps both ends agreed. Existing
+omp processes keep their old environment - a new window is needed.

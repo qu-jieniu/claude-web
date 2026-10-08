@@ -297,14 +297,27 @@ class Multiplexer:
             count += 1
         return candidate
 
+    # Panes inherit tmux's own environment, not this client's, so anything the
+    # pane needs has to be passed explicitly with -e. Images: omp emits SIXEL
+    # (rendered by the frontend's image addon, forwarded by tmux's
+    # allow-passthrough) only when both of these are set; otherwise an image
+    # arrives as the blank block omp reserved for it.
+    # os.environ wins, so an operator can still pin a different protocol (or
+    # turn images off entirely) without editing this file.
+    WINDOW_ENV = tuple(
+        part
+        for key, default in (("PI_FORCE_IMAGE_PROTOCOL", "sixel"), ("PI_ALLOW_SIXEL_PASSTHROUGH", "1"))
+        for part in ("-e", f"{key}={os.environ.get(key, default)}")
+    )
+
     def create(self, cwd, name, command):
         name = self.unique_name(name)
         sessions = self.run("list-sessions", "-F", "#{session_name}", quiet=True)
         if sessions is not None and self.session in sessions.splitlines():
             return self.run("new-window", "-d", "-P", "-F", "#{window_id}", "-t", f"={self.session}:",
-                            "-n", name, "-c", cwd, *command)
+                            "-n", name, "-c", cwd, *self.WINDOW_ENV, *command)
         return self.run("new-session", "-d", "-P", "-F", "#{window_id}", "-s", self.session,
-                        "-n", name, "-c", cwd, *command, fresh=sessions is None)
+                        "-n", name, "-c", cwd, *self.WINDOW_ENV, *command, fresh=sessions is None)
 
 
 def screens():

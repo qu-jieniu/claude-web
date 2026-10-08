@@ -11,6 +11,8 @@ for (const [source, name] of [
   ['@xterm/addon-fit/LICENSE', 'addon-fit.LICENSE'],
   ['@xterm/addon-canvas/lib/addon-canvas.js', 'addon-canvas.js'],
   ['@xterm/addon-canvas/LICENSE', 'addon-canvas.LICENSE'],
+  ['@xterm/addon-image/lib/addon-image.js', 'addon-image.js'],
+  ['@xterm/addon-image/LICENSE', 'addon-image.LICENSE'],
 ]) {
   await copyFile(new URL(`node_modules/${source}`, root), new URL(name, destination));
 }

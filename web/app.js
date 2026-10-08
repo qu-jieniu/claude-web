@@ -96,6 +96,19 @@
       term.loadAddon(new CanvasAddon.CanvasAddon());
     } catch {}
   }
+  // omp probes this terminal and, finding no graphics protocol, still emits
+  // SIXEL for images - which a plain xterm.js drops, leaving the blank block it
+  // had reserved. Render them instead (SIXEL + iTerm2 IIP). Loaded after the
+  // canvas addon so the renderer exists first.
+  if (window.ImageAddon) {
+    try {
+      term.loadAddon(new ImageAddon.ImageAddon({
+        sixelSupport: true,
+        iipSupport: true,
+        showPlaceholder: true,
+      }));
+    } catch {}
+  }
   window.term = term;
   term.textarea.setAttribute('aria-label', 'Terminal input');
   term.textarea.setAttribute('autocapitalize', 'off');
