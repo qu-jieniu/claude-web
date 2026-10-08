@@ -879,11 +879,16 @@
         await uploadFiles([image]);
         return;
       }
-      // Safari never reaches the branch above (no clipboard.read at all), so say
-      // how to get an image in there rather than only what failed.
+      // Safari never reaches the branch above (it has no clipboard.read at all),
+      // so say how to get an image in rather than only what failed. Apple touch
+      // devices (iPhone/iPad - iPadOS reports itself as a Mac) have no Command-V,
+      // so point at the picker, which opens the photo library there.
+      const appleTouch = applePlatform && navigator.maxTouchPoints > 0;
       showNotice(navigator.clipboard?.read
         ? 'Nothing to paste: the clipboard holds no text or image. Use Attach for a file.'
-        : 'Nothing to paste as text. Press the paste shortcut (⌘V) for an image, or use Attach.');
+        : appleTouch
+          ? 'Nothing to paste as text. Use Attach to pick a photo or a file.'
+          : 'Nothing to paste as text. Press the paste shortcut (⌘V) for an image, or use Attach.');
     } catch {
       if (!leaving) openPasteDialog();
     }

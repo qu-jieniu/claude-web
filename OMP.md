@@ -9,7 +9,7 @@ home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-50` and attaches to
+**Active persistent deployment:** production runs `18.3.2-51` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -41,11 +41,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-50 .
+podman build -t localhost/omp-web-rebuild:18.3.2-51 .
 podman run --rm -it --name omp-web-rebuild \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-50
+  localhost/omp-web-rebuild:18.3.2-51
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2153,3 +2153,21 @@ Verified: a synthetic paste event carrying a 113-byte PNG was intercepted
 filename preserved) with its `@path` inserted into the terminal; a text-only paste
 event was not intercepted; with `clipboard.read` removed (Safari's shape) the
 button shows the guidance notice. Image `18.3.2-50`.
+
+### iPhone: paste guidance, and the path that works there (`18.3.2-51`, frontend)
+
+Safari on iOS has no `navigator.clipboard.read()` (as on macOS) and no Command-V,
+so the notice `18.3.2-50` added was giving advice that cannot be followed on a
+phone. It is now platform-aware: Apple touch devices - iPhone/iPad, where iPadOS
+reports itself as a Mac so `maxTouchPoints` is the tell - are told to use
+**Attach**, which opens the photo library; other platforms keep the ⌘V hint.
+
+The `paste` listener still applies on iOS: if the platform offers its paste menu
+over the terminal, an image lands exactly as it does on macOS. The reliable path
+there is Attach, and that is now what the app says.
+
+Verified at a 390x844 touch viewport with an iPhone user agent: the Paste button
+shows "Nothing to paste as text. Use Attach to pick a photo or a file.", and
+picking a file through the hidden input uploaded it and inserted
+`@/home/jieniu/.omp/uploads/20261008_211641_iphone-photo.png` into the shell.
+Image `18.3.2-51`.
