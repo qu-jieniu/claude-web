@@ -20,11 +20,12 @@ review batch below are included.
 ## Architecture
 
 ```text
-  HTTP /                         -> Caddy -> web/
-  POST /upload, /presence        -> Caddy -> Python upload/history service -> ~/.omp/{uploads,web-visible}
-  GET  /history, /history/search -> Caddy -> same service -> tmux capture-pane
-  WebSocket /t/ws + /t/token     -> Caddy -> ttyd -> omp-launcher -> tmux -> omp/bash
-  Local terminal                 -> omp-launcher -> same tmux server
+  HTTP /                              -> Caddy -> web/
+  POST /upload, /presence             -> Caddy -> Python service -> ~/.omp/{uploads,web-visible}
+  GET  /history, /history/search      -> Caddy -> same service -> tmux capture-pane
+  GET  /windows, POST /windows/select -> Caddy -> same service -> tmux list-windows / select-window
+  WebSocket /t/ws + /t/token          -> Caddy -> ttyd -> omp-launcher -> tmux -> omp/bash
+  Local terminal                      -> omp-launcher -> same tmux server
 ```
 
 There is no iframe, session publisher, polling title watcher, patched WebSocket
