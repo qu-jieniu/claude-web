@@ -3,26 +3,30 @@
 # 1. Generates the front Caddyfile: :8080 → /t/* to local ttyd, / to wrapper.
 #    Webroot prefers the mounted home's wrapper (stays in sync on the homelab),
 #    falls back to the baked copy on fresh machines.
-# 2. Starts Caddy in the background and execs ttyd (the critical path is the
-#    main process — if ttyd dies, the container restarts).
+# 2. Supervises both Caddy and ttyd: either server exiting stops the appliance
+#    with a failure status so Restart=on-failure can recover it.
 set -euo pipefail
 
 WEBROOT=/opt/omp-web/web
 [ -f "$HOME/.containers/omp-web/web/index.html" ] && WEBROOT="$HOME/.containers/omp-web/web"
 
 cat > /tmp/omp-web-front.caddy <<EOF
+{
+	admin off
+	persist_config off
+}
+
 :8080 {
 	handle /t/* {
 		reverse_proxy 127.0.0.1:7682
 	}
 	handle {
-		root * ${WEBROOT}
+		root * "${WEBROOT}"
 		file_server
 	}
 }
 EOF
 
-caddy run --config /tmp/omp-web-front.caddy --adapter caddyfile &
 
 # `host` — interactive shell on the HOST via the mounted user systemd bus
 # (DBUS_SESSION_BUS_ADDRESS=/run/user/1000/bus). ssh-free escape hatch from
@@ -44,7 +48,33 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 # 0.0.0.0 inside the container: pasta delivers published ports to the
 # container's eth0, not loopback. Host exposure stays on 127.0.0.1
 # via PublishPort; Caddy terminates TLS in front.
-exec /usr/bin/ttyd -p 7682 -i 0.0.0.0 -W -a -b /t -T ttyd-256color \
+# Origin checking blocks other websites from opening a writable terminal in
+# a visitor's browser. It is not authentication: keep published ports private
+# and enforce access control at the HTTPS proxy.
+/usr/bin/ttyd -p 7682 -i 0.0.0.0 -W -O -a -b /t -T ttyd-256color \
     -t fontSize=14 -t disableLeaveAlert=true \
     -t rendererType=dom \
-    /usr/local/bin/omp-web-launch
+    /usr/local/bin/omp-web-launch &
+ttyd_pid=$!
+
+# Install traps before starting the second child. A deliberate container stop
+# exits successfully; an unexpected exit (even status 0) of either server fails.
+cleanup() {
+    trap '' TERM INT
+    kill -TERM "$ttyd_pid" ${caddy_pid:+"$caddy_pid"} 2>/dev/null || true
+    wait "$ttyd_pid" 2>/dev/null || true
+    if [ -n "${caddy_pid:-}" ]; then
+        wait "$caddy_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+
+caddy run --config /tmp/omp-web-front.caddy --adapter caddyfile &
+caddy_pid=$!
+
+status=0
+wait -n "$ttyd_pid" "$caddy_pid" || status=$?
+printf 'omp-web: a required server exited (status %s); stopping both servers\n' "$status" >&2
+[ "$status" -ne 0 ] || status=1
+exit "$status"

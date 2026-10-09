@@ -18,35 +18,43 @@ set_title() { printf '\033]0;%s\007' "$1"; }
 # tmux attach runs under TERM=ttyd-256m (see ttyd-256m.src): tmux enables and
 # parses mouse only when the client terminfo has kmous, and the default
 # ttyd-256color strips it (kept for the legacy screen fallback paths).
-tmux_attach() { TERM=ttyd-256m tmux attach "$@"; }
+tmux_attach() {
+    if [[ "${TERM:-}" == ttyd-* ]]; then
+        TERM=ttyd-256m tmux attach "$@"
+    else
+        tmux attach "$@"
+    fi
+}
 
 # Unique window-name suffix within session 1: <base>, <base>-2, <base>-3, …
 next_win_name() {
     local base="${1:-shell}"
     local i=1 name="$base"
-    while tmux list-windows -t =1 -F '#{window_name}' 2>/dev/null | LC_ALL=C grep -qx "$name"; do
+    while tmux list-windows -t =1 -F '#{window_name}' 2>/dev/null | LC_ALL=C grep -Fxq -- "$name"; do
         i=$((i+1)); name="$base-$i"
     done
     printf '%s' "$name"
 }
 
 # Launch omp as a NEW WINDOW in host tmux session "1" (created if absent) and
-# select it. $1 = window name, $2 = cwd, $3 = omp args (may be empty). The
-# trailing `exec bash` keeps the pane alive after omp exits (same contract the
-# screen flow had); with remain-on-exit a dead pane is recoverable via prefix+R.
+# select it. $1 = window name, $2 = cwd, remaining arguments go to omp.
+# Pass argv directly to tmux: paths and session IDs must never become shell
+# source. The login shell changes directory explicitly after startup files.
 launch_omp_window() {
-    local name="$1" cwd="$2" args="$3"
+    local name="$1" cwd="$2" wid
+    shift 2
+    name=$(next_win_name "$name")
     set_title "omp-$name"
     if tmux has-session -t =1 2>/dev/null; then
-        tmux new-window -t =1: -n "$name" -c "$cwd" \
-            "bash -lc 'cd \"$cwd\" && omp --allow-home ${args}; exec bash'" \
+        wid=$(tmux new-window -P -F '#{window_id}' -t =1: -n "$name" -c "$cwd" \
+            bash -lc 'cd -- "$1" || exit; shift; omp --allow-home "$@"; exec bash' omp-web "$cwd" "$@") \
             || { echo "tmux new-window failed"; sleep 1; return 1; }
     else
-        tmux new-session -d -s 1 -n "$name" -c "$cwd" \
-            "bash -lc 'cd \"$cwd\" && omp --allow-home ${args}; exec bash'" \
+        wid=$(tmux new-session -d -P -F '#{window_id}' -s 1 -n "$name" -c "$cwd" \
+            bash -lc 'cd -- "$1" || exit; shift; omp --allow-home "$@"; exec bash' omp-web "$cwd" "$@") \
             || { echo "tmux new-session failed"; sleep 1; return 1; }
     fi
-    tmux_attach -t 1
+    tmux_attach -t "$wid"
 }
 
 short_name_for() {
@@ -71,19 +79,25 @@ time_ago() {
     fi
 }
 
-# Truncate a menu label to the terminal width (minus a small margin) with an
-# ellipsis, so long cwd paths / session previews wrap at the entry boundary
-# instead of mid-word inside the entry.
+# Keep labels within the actual viewport, including wide Unicode characters.
 fit_label() {
-    local cols=${COLUMNS:-80}
-    (( cols < 50 )) && cols=50
-    local max=$(( cols - 6 ))
-    local s="$1"
-    if (( ${#s} <= max )); then
-        printf '%s' "$s"
-    else
-        printf '%s…' "${s:0:max-1}"
-    fi
+    python3 - "${COLUMNS:-80}" "${2:-6}" "$1" <<'PY'
+import sys, unicodedata
+cols, margin, text = sys.argv[1:]
+limit = max(1, int(cols) - int(margin))
+text = ''.join(c if not unicodedata.category(c).startswith('C') else ' ' for c in text)
+def width(c):
+    return 0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1
+if sum(map(width, text)) > limit:
+    out, used = [], 0
+    for c in text:
+        if used + width(c) > limit - 1:
+            break
+        out.append(c)
+        used += width(c)
+    text = ''.join(out) + '…'
+print(text, end='')
+PY
 }
 
 extract_cwd() {
@@ -96,7 +110,7 @@ try:
             if not line: continue
             try: d = json.loads(line)
             except Exception: continue
-            if isinstance(d, dict) and 'cwd' in d:
+            if isinstance(d, dict) and isinstance(d.get('cwd'), str):
                 print(d['cwd']); break
 except Exception:
     pass
@@ -179,7 +193,7 @@ def extract_cwd(path):
                 if not line: continue
                 try: d = json.loads(line)
                 except Exception: continue
-                if isinstance(d, dict) and 'cwd' in d:
+                if isinstance(d, dict) and isinstance(d.get('cwd'), str):
                     return d['cwd']
     except Exception:
         pass
@@ -226,6 +240,7 @@ def preview(path):
                 if not line: continue
                 try: d = json.loads(line)
                 except Exception: continue
+                if not isinstance(d, dict): continue
                 t = d.get('type')
                 if t in ('title', 'title_change') and d.get('title'):
                     title = str(d['title'])
@@ -266,20 +281,43 @@ PY
 }
 
 banner() {
+    local size
+    size=$(stty size 2>/dev/null) || size=""
+    [[ "$size" =~ ^[0-9]+\ ([0-9]+)$ ]] && (( BASH_REMATCH[1] > 0 )) && COLUMNS=${BASH_REMATCH[1]}
+    [[ "${COLUMNS:-}" =~ ^[1-9][0-9]*$ ]] || COLUMNS=80
     clear
     set_title "omp-launcher"
-    printf '\n'
-    printf '  omp — session launcher\n'
+    printf '\n  %s\n' "$(fit_label 'omp — session launcher' 2)"
     printf '  %s\n\n' "$(date '+%F %H:%M')"
-    printf '  tmux:  Ctrl-a d          = detach (back to this menu)\n'
-    printf '         Ctrl-a [          = scroll mode (PgUp/PgDn, / and ? search, q exit)\n'
-    printf '         Ctrl-a j          = live JSONL view of this session (q to close)\n'
-    printf '         Ctrl-a n/p or <n> = switch windows\n\n'
+    local hint
+    for hint in 'Ctrl-a d: detach' 'Ctrl-a [: scroll / search' 'Ctrl-a j: transcript' 'Ctrl-a n/p: switch windows'; do
+        printf '  %s\n' "$(fit_label "$hint" 2)"
+    done
+    printf '\n'
+}
+
+# Unlike bash select, always use one column, even after a viewport resize.
+# The selected zero-based index is returned in REPLY.
+choose_item() {
+    local prompt="$1" i=0 choice
+    shift
+    for choice in "$@"; do
+        ((i+=1))
+        printf '  %2d) %s\n' "$i" "$(fit_label "$choice")"
+    done
+    while read -erp "$prompt: " choice; do
+        if [[ "$choice" =~ ^[0-9]{1,6}$ ]] && (( 10#$choice >= 1 && 10#$choice <= $# )); then
+            REPLY=$((10#$choice - 1))
+            return
+        fi
+        printf 'Choose 1–%d, or Ctrl-D to return.\n' "$#"
+    done
+    return 1
 }
 
 resume_specific_session() {
     # Resume an omp session as a window in host tmux session "1".
-    # Placement policy: never run two omp processes on one session uuid.
+    # Reuse a pane whose launch command already identifies this session UUID.
     #   1. uuid already live in a window  → select that window
     #   2. project window exists but dead → resume INTO it (id stays stable)
     #   3. otherwise                      → new window (name auto-deduped)
@@ -288,19 +326,23 @@ resume_specific_session() {
 
     # 1) already running somewhere?
     local wid
-    wid=$(tmux list-windows -t '=1' -F '#{window_id}|#{pane_dead}|#{pane_start_command}' 2>/dev/null \
-        | while IFS='|' read -r w dead cmd; do
-            [[ "$cmd" == *"$uuid"* ]] && echo "$w|$dead"
-          done | head -1)
+    wid=$(tmux list-panes -a -F '#{window_id}|#{pane_id}|#{pane_dead}|#{pane_start_command}' 2>/dev/null \
+        | while IFS='|' read -r w pane dead cmd; do
+            if [[ "$cmd" == *"$uuid"* ]]; then
+                echo "$w|$pane|$dead"
+                break
+            fi
+          done)
     if [ -n "$wid" ]; then
-        local w="${wid%%|*}" dead="${wid##*|}"
+        local w pane dead
+        IFS='|' read -r w pane dead <<< "$wid"
         if [ "$dead" = "1" ]; then
-            tmux respawn-pane -k -t "$w" "bash -lc 'omp --resume $uuid --allow-home; exec bash'"
+            tmux respawn-pane -t "$pane" -c "$cwd" \
+                bash -lc 'cd -- "$1" || exit; shift; omp --allow-home "$@"; exec bash' omp-web "$cwd" --resume "$uuid" || return 1
         fi
         tmux select-window -t "$w"
-        echo "Session already running — selected its window."
-        sleep 1
-        tmux_attach -t 1
+        tmux select-pane -t "$pane"
+        tmux_attach -t "$w"
         return
     fi
 
@@ -309,38 +351,37 @@ resume_specific_session() {
     n=$(prompt_screen_name "$default") || { echo "invalid name"; sleep 1; return 1; }
 
     # 2) project window dead → reuse it (same name/cwd, keep the id)
-    local proj_wid proj_dead
+    local proj_wid
     proj_wid=$(tmux list-windows -t '=1' -F '#{window_name}|#{window_id}|#{pane_dead}|#{pane_current_path}' 2>/dev/null \
         | while IFS='|' read -r wn w pdead ppath; do
             [ "$wn" = "$n" ] && [ "$pdead" = "1" ] && echo "$w"
           done | head -1)
     if [ -n "$proj_wid" ]; then
-        local flags; flags=$(prompt_auto_approve)
-        tmux respawn-pane -k -t "$proj_wid" \
-            "bash -lc 'cd \"$cwd\" && omp --resume $uuid${flags} --allow-home; exec bash'"
+        local flags; flags=$(prompt_auto_approve) || return 1
+        tmux respawn-pane -t "$proj_wid" -c "$cwd" \
+            bash -lc 'cd -- "$1" || exit; shift; omp --allow-home "$@"; exec bash' omp-web "$cwd" --resume "$uuid" ${flags:+"$flags"} || return 1
         tmux select-window -t "$proj_wid"
-        tmux_attach -t 1
+        tmux_attach -t "$proj_wid"
         return
     fi
 
-    # 3) new window — dedupe the name against live windows
-    while tmux list-windows -t '=1' -F '#{window_name}' 2>/dev/null | LC_ALL=C grep -qx "$n"; do
-        n="${n}-2"
-    done
-    local flags; flags=$(prompt_auto_approve)
-    launch_omp_window "$n" "$cwd" "--resume $uuid${flags}"
+    # 3) new window — launch_omp_window deduplicates the name.
+    local flags; flags=$(prompt_auto_approve) || return 1
+    launch_omp_window "$n" "$cwd" --resume "$uuid" ${flags:+"$flags"}
 }
 
 pick_by_uuid() {
     local input full_uuid matches=()
     read -erp "UUID (full or 8+ char prefix): " input || return
-    input=$(echo "$input" | tr -d '[:space:]' | tr -cd '0-9a-fA-F-')
-    [ -z "$input" ] && return
-    [ "${#input}" -lt 8 ] && { echo "need 8+ chars"; sleep 1; return; }
+    input="${input,,}"
+    [[ "$input" =~ ^[0-9a-f-]{8,36}$ ]] || { echo "need a UUID or 8+ char prefix"; sleep 1; return; }
 
     # Find matching jsonl files under any project dir. omp session files are
     # <timestamp>_<uuid>.jsonl, so anchor on the underscore before the UUID.
-    while IFS= read -r f; do matches+=("$f"); done < <(compgen -G "$PROJECTS_DIR/*/*_${input}*.jsonl" 2>/dev/null || true)
+    local f
+    for f in "$PROJECTS_DIR"/*/*_"$input"*.jsonl; do
+        [ -f "$f" ] && matches+=("$f")
+    done
 
     if [ "${#matches[@]}" -eq 0 ]; then
         echo "No session matching $input"; sleep 2; return
@@ -351,7 +392,9 @@ pick_by_uuid() {
         sleep 3; return
     fi
     local f="${matches[0]}"
-    full_uuid=$(basename "$f" .jsonl)
+    full_uuid="${f##*/}"
+    full_uuid="${full_uuid%.jsonl}"
+    full_uuid="${full_uuid##*_}"
     local cwd; cwd=$(extract_cwd "$f")
     if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then
         echo "cwd not found or stale for $full_uuid"; sleep 2; return
@@ -363,13 +406,13 @@ pick_by_uuid() {
 
 pick_session_menu() {
     banner
-    echo "Pick a project (or type a UUID directly):"
+    echo "Choose project or UUID:"
     echo
     local -a plabels=() pcwds=() pdirs=() pnames=()
     local name cwd mtime pdir
     while IFS='|' read -r name cwd mtime pdir; do
         [ -z "$name" ] && continue
-        plabels+=("$(fit_label "$name  —  $cwd  ($(time_ago "$mtime"))")")
+        plabels+=("$name  —  $cwd  ($(time_ago "$mtime"))")
         pcwds+=("$cwd")
         pdirs+=("$pdir")
         pnames+=("$name")
@@ -377,53 +420,38 @@ pick_session_menu() {
     plabels+=("[id] Type UUID directly...")
     plabels+=("cancel")
 
-    PS3=$'\nproject: '
-    local opt
-    select opt in "${plabels[@]}"; do
-        [ -z "${opt:-}" ] && continue
-        [ "$opt" = "cancel" ] && return
-        if [ "$opt" = "[id] Type UUID directly..." ]; then
-            pick_by_uuid; return
-        fi
-        local idx=$(( REPLY - 1 ))
-        (( idx < 0 || idx >= ${#pcwds[@]} )) && continue
-        local sel_name="${pnames[$idx]}"
-        local sel_cwd="${pcwds[$idx]}"
-        local sel_pdir="${pdirs[$idx]}"
-
-        echo
-        echo "Sessions in $sel_name (newest first):"
-        echo
-        local -a slabels=() suuids=()
-        local uuid stime preview
-        while IFS='|' read -r uuid stime preview; do
-            [ -z "$uuid" ] && continue
-            slabels+=("$(fit_label "${uuid:0:8}  ($(time_ago "$stime"))  ${preview:0:70}")")
-            suuids+=("$uuid")
-        done < <(list_sessions_in "$sel_pdir")
-        if [ "${#suuids[@]}" -eq 0 ]; then
-            echo "(no sessions in $sel_pdir)"; sleep 1; return
-        fi
-        slabels+=("cancel")
-
-        PS3=$'\nsession: '
-        local sopt
-        select sopt in "${slabels[@]}"; do
-            [ -z "${sopt:-}" ] && continue
-            [ "$sopt" = "cancel" ] && return
-            local sidx=$(( REPLY - 1 ))
-            (( sidx < 0 || sidx >= ${#suuids[@]} )) && continue
-            resume_specific_session "$sel_name" "$sel_cwd" "${suuids[$sidx]}"
-            return
-        done
+    choose_item project "${plabels[@]}" || return
+    local idx=$REPLY
+    (( idx == ${#pcwds[@]} + 1 )) && return
+    if (( idx == ${#pcwds[@]} )); then
+        pick_by_uuid
         return
-    done
+    fi
+    local sel_name="${pnames[$idx]}"
+    local sel_cwd="${pcwds[$idx]}"
+    local sel_pdir="${pdirs[$idx]}"
+
+    printf '\n%s\n\n' "$(fit_label "Sessions: $sel_name" 0)"
+    local -a slabels=() suuids=()
+    local uuid stime preview
+    while IFS='|' read -r uuid stime preview; do
+        [ -z "$uuid" ] && continue
+        slabels+=("${uuid:0:8}  ($(time_ago "$stime"))  ${preview:0:70}")
+        suuids+=("$uuid")
+    done < <(list_sessions_in "$sel_pdir")
+    if [ "${#suuids[@]}" -eq 0 ]; then
+        echo "(no sessions found)"; sleep 1; return
+    fi
+    slabels+=("cancel")
+    choose_item session "${slabels[@]}" || return
+    (( REPLY == ${#suuids[@]} )) && return
+    resume_specific_session "$sel_name" "$sel_cwd" "${suuids[$REPLY]}"
 }
 
 prompt_screen_name() {
     # $1 = default (without omp- prefix). Prints chosen name on stdout (also without prefix).
     local default="$1" input n
-    read -erp "Screen name [omp-$default]: " input
+    read -erp "Window name [$default]: " input || return 1
     input="${input:-$default}"
     # Strip omp- so typing "omp-foo" doesn't become omp-omp-foo
     input="${input#omp-}"
@@ -434,9 +462,9 @@ prompt_screen_name() {
 
 prompt_auto_approve() {
     local ans
-    read -erp "Auto-approve all tool calls (--auto-approve)? [y/N]: " ans
+    read -erp "Auto-approve tools? [y/N]: " ans || return 1
     case "${ans,,}" in
-        y|yes) printf ' --auto-approve' ;;
+        y|yes) printf '%s' '--auto-approve' ;;
         *) printf '' ;;
     esac
 }
@@ -447,49 +475,22 @@ prompt_custom_path() {
     p="${p/#\~/$HOME}"
     [ -z "$p" ] && return 1
     if [ ! -e "$p" ]; then
-        read -erp "Path does not exist. Create it? [Y/n]: " ans
+        read -erp "Create path? [Y/n]: " ans || return 1
         case "${ans,,}" in
             n|no) echo "cancelled"; sleep 1; return 1 ;;
         esac
-        mkdir -p "$p" || { echo "mkdir failed"; sleep 1; return 1; }
+        mkdir -p -- "$p" || { echo "mkdir failed"; sleep 1; return 1; }
     fi
-    p=$(realpath -e "$p" 2>/dev/null) || { echo "invalid path"; sleep 1; return 1; }
+    p=$(realpath -e -- "$p" 2>/dev/null) || { echo "invalid path"; sleep 1; return 1; }
     [ -d "$p" ] || { echo "not a directory"; sleep 1; return 1; }
     default=$(short_name_for "$p")
     n=$(prompt_screen_name "$default") || { echo "invalid name"; sleep 1; return 1; }
-    local flags; flags=$(prompt_auto_approve)
-    launch_omp_window "$n" "$p" "$flags"
+    local flags; flags=$(prompt_auto_approve) || return 1
+    launch_omp_window "$n" "$p" ${flags:+"$flags"}
 }
 
-# Start a new omp tab as a WINDOW in the host tmux (session "1" if present,
-# else create it), so it joins the same tabbed universe as the other live
-# sessions. Attach to it immediately after creation.
-new_tmux_window() {
-    local p default n
-    read -erp "Path (Tab to complete): " p || return 1
-    p="${p/#\~/$HOME}"
-    [ -z "$p" ] && return 1
-    if [ ! -d "$p" ]; then
-        read -erp "Path does not exist. Create it? [Y/n]: " ans
-        case "${ans,,}" in
-            n|no) echo "cancelled"; sleep 1; return 1 ;;
-        esac
-        mkdir -p "$p" || { echo "mkdir failed"; sleep 1; return 1; }
-    fi
-    p=$(realpath -e "$p" 2>/dev/null) || { echo "invalid path"; sleep 1; return 1; }
-    [ -d "$p" ] || { echo "not a directory"; sleep 1; return 1; }
-    default=$(short_name_for "$p")
-    n=$(prompt_screen_name "$default") || { echo "invalid name"; sleep 1; return 1; }
-    if tmux has-session -t =1 2>/dev/null; then
-        tmux new-window -t =1: -n "$n" -c "$p" "bash -lc 'omp --allow-home'" \
-            || { echo "tmux new-window failed"; sleep 1; return 1; }
-        tmux_attach -t 1
-    else
-        tmux new-session -d -s 1 -n "$n" -c "$p" "bash -lc 'omp --allow-home'" \
-            || { echo "tmux new-session failed"; sleep 1; return 1; }
-        tmux_attach -t 1
-    fi
-}
+# Both historical new-session shortcuts use the same safe launch flow.
+new_tmux_window() { prompt_custom_path; }
 
 run_menu() {
     banner
@@ -510,7 +511,7 @@ run_menu() {
             prev_sess="$sess"
             local tstar=""
             [ "$wactive" = "1" ] && tstar="*"
-            labels+=("$(fit_label "[tmux $sess:$widx] $wname$tstar  —  $wpath")")
+            labels+=("[tmux $sess:$widx] $wname$tstar  —  $wpath")
             actions+=("tattach:$wwid")
         done < <(tmux list-windows -a -F '#{session_name}|#{window_index}|#{window_name}|#{window_active}|#{pane_current_path}|#{window_id}' 2>/dev/null)
     fi
@@ -518,19 +519,19 @@ run_menu() {
     # blank line between the entry groups and the letter shortcuts
     [ ${#labels[@]} -gt 0 ] && [ -n "${actions[${#actions[@]}-1]}" ] && { labels+=(""); actions+=(""); }
 
-    labels+=("(s) [shell]   New host shell (plain bash, tmux window)")
+    labels+=("(s) New shell")
     actions+=("shell"); letter_map[s]=$(( ${#actions[@]} - 1 ))
 
-    labels+=("(t) [tmux]    Attach host tmux (most recent session)")
+    labels+=("(t) Attach tmux")
     actions+=("tmux"); letter_map[t]=$(( ${#actions[@]} - 1 ))
 
-    labels+=("(w) [new tmux] New omp tab in host tmux...")
+    labels+=("(w) New omp window")
     actions+=("newtmux"); letter_map[w]=$(( ${#actions[@]} - 1 ))
 
-    labels+=("(n) [new]     Start in custom path...")
+    labels+=("(n) New in custom path")
     actions+=("custom"); letter_map[n]=$(( ${#actions[@]} - 1 ))
 
-    labels+=("(p) [pick]    Resume a session...")
+    labels+=("(p) Resume session")
     actions+=("pick_session"); letter_map[p]=$(( ${#actions[@]} - 1 ))
 
     local i shown=0
@@ -542,7 +543,7 @@ run_menu() {
         else
             shown=$((shown + 1))
             num_map[shown]=$i
-            printf '  %2d) %s\n' "$shown" "${labels[$i]}"
+            printf '  %2d) %s\n' "$shown" "$(fit_label "${labels[$i]}")"
         fi
     done
 
@@ -558,8 +559,8 @@ run_menu() {
                 echo "no shortcut '$reply'"; continue
             fi
             idx="${letter_map[$l]}"
-        elif [[ "$reply" =~ ^[0-9]+$ ]]; then
-            idx="${num_map[$reply]:-}"
+        elif [[ "$reply" =~ ^[0-9]{1,6}$ ]]; then
+            idx="${num_map[$((10#$reply))]:-}"
             if [ -z "$idx" ]; then
                 echo "out of range" ; continue
             fi
@@ -579,14 +580,14 @@ run_menu() {
             newtmux)        new_tmux_window; return ;;
             shell)          # Plain host shell as a tmux window — every tmux
                             # pane runs on the host, so no bridge is needed.
-                            local n; n=$(next_win_name shell)
+                            local n wid; n=$(next_win_name shell)
                             set_title "omp-$n"
                             if tmux has-session -t =1 2>/dev/null; then
-                                tmux new-window -t =1: -n "$n" -c "$HOME" 'bash -l'
+                                wid=$(tmux new-window -P -F '#{window_id}' -t =1: -n "$n" -c "$HOME" bash -l) || return 1
                             else
-                                tmux new-session -d -s 1 -n "$n" -c "$HOME" 'bash -l'
+                                wid=$(tmux new-session -d -P -F '#{window_id}' -s 1 -n "$n" -c "$HOME" bash -l) || return 1
                             fi
-                            tmux_attach -t 1
+                            tmux_attach -t "$wid"
                             return ;;
             pick_session)   pick_session_menu; return ;;
         esac
@@ -600,7 +601,7 @@ run_menu() {
 # detach, tmux_attach returns and the loop below shows the menu, so the tab
 # stays useful.
 if [ -n "${1:-}" ]; then
-    suffix=$(sanitize "${1#omp-}")
+    suffix="${1#omp-}"
     if [ "$suffix" = "tmux" ]; then
         # ?arg=tmux — straight into the host tmux (its own session/window
         # bar provides the cycling UX).

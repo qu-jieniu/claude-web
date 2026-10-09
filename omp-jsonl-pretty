@@ -10,8 +10,21 @@ Usage: omp-jsonl-pretty <path>
 """
 from __future__ import annotations
 import json
+import shutil
 import sys
 from datetime import datetime
+import unicodedata
+
+
+WIDTH = max(1, min(70, shutil.get_terminal_size().columns - 1))
+
+
+def safe_text(text: str) -> str:
+    """Never replay terminal controls stored in messages or tool output."""
+    return "".join(
+        c for c in text
+        if c in "\n\t" or unicodedata.category(c) != "Cc"
+    )
 
 
 def fmt_ts(ts: str) -> str:
@@ -42,23 +55,30 @@ def text_of(content) -> str:
         return ""
     parts: list[str] = []
     for c in content:
-        if isinstance(c, dict) and c.get("type") == "text":
+        if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str):
             parts.append(c.get("text", ""))
     return "\n".join(p for p in parts if p).rstrip()
 
 
 def assistant_block(msg: dict) -> str:
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content.rstrip()
+    if not isinstance(content, list):
+        return ""
     parts: list[str] = []
-    for c in msg.get("content", []):
+    for c in content:
         if not isinstance(c, dict):
             continue
         t = c.get("type")
         if t == "text":
-            txt = c.get("text", "").rstrip()
+            txt = c.get("text", "")
+            txt = txt.rstrip() if isinstance(txt, str) else ""
             if txt:
                 parts.append(txt)
         elif t == "thinking":
-            txt = c.get("thinking", "").rstrip()
+            txt = c.get("thinking", "")
+            txt = txt.rstrip() if isinstance(txt, str) else ""
             if txt:
                 parts.append(f"  ⟪ thinking: {short(txt, 200)} ⟫")
         elif t == "toolCall":
@@ -104,6 +124,8 @@ def fmt(line: str) -> str | None:
         d = json.loads(line)
     except Exception:
         return None
+    if not isinstance(d, dict):
+        return None
     t = d.get("type")
     ts = fmt_ts(d.get("timestamp", ""))
     if t == "session":
@@ -111,19 +133,21 @@ def fmt(line: str) -> str | None:
         return f"# omp session {d.get('id', '')}  ·  {cwd}  ·  {ts}\n"
     if t == "message":
         msg = d.get("message", {})
+        if not isinstance(msg, dict):
+            return None
         role = msg.get("role")
         if role == "user":
             text = text_of(msg.get("content"))
             if not text:
                 return None
-            sep = "─" * 70
+            sep = "─" * WIDTH
             return f"\n{sep}\n  YOU  {ts}\n{sep}\n{text}\n"
         if role == "assistant":
             body = assistant_block(msg)
             if not body:
                 return None
             model = msg.get("model", "")
-            sep = "═" * 70
+            sep = "═" * WIDTH
             head = f"  OMP  {ts}" + (f"  · {model}" if model else "")
             return f"\n{sep}\n{head}\n{sep}\n{body}\n"
         if role == "toolResult":
@@ -133,10 +157,13 @@ def fmt(line: str) -> str | None:
             return f"\n{body}\n"
         return None
     if t == "compaction":
-        sep = "·" * 70
-        return f"\n{sep}\n  COMPACTION\n{sep}\n{(d.get('summary') or '').strip()}\n"
+        sep = "·" * WIDTH
+        summary = d.get("summary")
+        summary = summary.strip() if isinstance(summary, str) else ""
+        return f"\n{sep}\n  COMPACTION\n{sep}\n{summary}\n"
     if t in ("title", "title_change"):
-        title = (d.get("title") or "").strip()
+        title = d.get("title")
+        title = title.strip() if isinstance(title, str) else ""
         if not title:
             return None
         return f"\n## {title}\n"
@@ -157,9 +184,12 @@ def main() -> int:
         for line in fp:
             out = fmt(line)
             if out:
-                sys.stdout.write(out)
+                sys.stdout.write(safe_text(out))
+        sys.stdout.flush()
     except BrokenPipeError:
-        pass
+        # Avoid another broken-pipe exception during interpreter shutdown.
+        import os
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return 0
 
 

@@ -5,18 +5,16 @@
 
 ## Overview
 
-Web terminal exposing persistent `screen` sessions running **omp** behind
-`https://omp.jieniuu8.com` (Caddy + Cloudflare DNS + Tailscale). Both the
-browser and a local terminal attach to the same named screen sessions, so
-state survives terminal crashes, SSH drops, and browser closes. A bash-based
-launcher picks which project/session to resume and what screen name to assign.
+Web terminal exposing persistent **host tmux windows** running omp behind
+`https://omp.jieniuu8.com` (Caddy + Cloudflare DNS + Tailscale). Browser and
+local terminals use the same launcher and tmux windows. Legacy screen
+sessions remain attachable, but the launcher creates only tmux windows.
 
-**Portable appliance container** (since 2026-09-25): everything runs inside a
-rootless podman container — ttyd, screen, python, Caddy (in-container front)
-and a **standalone omp binary** baked into the image. Starting the container
-on any machine = fully working web terminal, no host setup. `$HOME` is
-bind-mounted (state/projects ride along, e.g. via syncthing); everything
-missing falls back to baked copies.
+The appliance bundles ttyd, tmux, screen, Python, Caddy and the standalone
+omp binary for **Linux x86-64**. Without host mounts it uses container-local
+tmux. The homelab quadlet is host-specific: home path, UID, user-systemd and
+tmux socket mounts must be adapted on another machine. Host tmux settings
+(prefix, mouse, copy-mode bindings) are not baked into the image.
 
 **Ports:**
 - `127.0.0.1:7682` → ttyd — the homelab contract: host Caddy serves the
@@ -28,41 +26,32 @@ missing falls back to baked copies.
 **Host-command hatch:** the container mounts `/run/user/1000/systemd` and
 `/run/user/1000/bus` (both created by systemd at login on any Linux machine —
 zero host setup). From inside, omp gets `systemctl --user` and
-`systemd-run --user --wait <cmd>` = run commands as the user on the host
-(with `--wait` capturing output). Verified: a container-spawned transient unit
-wrote to the host filesystem.
+`systemd-run --user --pipe --wait <cmd>` = run commands as the user on the
+host and capture output. These mounts grant host-user authority; they are
+not a security boundary.
 
-**Tradeoff:** screens live inside the container's PID namespace — restarting
-`omp-web.service` kills running omp sessions (recover via `[pick]`; the
-session JSONLs live in the mounted home and survive everything).
+**Session lifetime:** host tmux windows survive container restarts. Any
+container-local tmux/screen processes die with the container; recover their
+saved sessions via `[pick]`.
 
 ## Architecture
 
-```
-Browser (omp.jieniuu8.com)                CLI (terminal)
-        │                                          │
-        │ HTTPS                                    │ bash
-        ▼                                          ▼
-Caddy (host) ─ /t/* reverse_proxy ─► quadlet omp-web.service        omp-attach function
-   (/ serves ~/.containers/omp-web/web wrapper      = podman container localhost/omp-web
-    → iframes /t/ and syncs URL ?arg=)         │ bind-mounts %h → /home/jieniu
-                                               │  + %t/systemd, %t/bus (host cmds)
-                                               ▼
-                        entrypoint: caddy :8080 (front) + ttyd :7682
-                                               │ spawns per-connection
-                                               ▼
-                            omp-web-launch → omp-launcher (home copy
-                                               or baked /opt/omp-web)
-                                               │
-                                     screen -S omp-<name> … omp
+```text
+Browser → host Caddy → / wrapper from mounted web/
+                    → /t/* → ttyd :7682 → omp-web-launch → omp-launcher
+                                                           ↓
+Local omp-attach ───────────────────────────────────→ host tmux windows
+
+Standalone front: container Caddy :8080 → same wrapper and ttyd
 ```
 
-- Browser and CLI both invoke the same launcher; they share the same screen
-  sessions via `screen -A -D -RR -S <name>`.
-- ttyd spawns the launcher *per WebSocket connection* — closing a browser tab
-  just kills one launcher instance; the screen session survives as a detached
-  daemon.
-- Sessions are named `omp-<suffix>` (`omp-myapp`, `omp-shell`, …).
+- The entrypoint supervises both Caddy and ttyd. Either server exiting
+  stops its sibling and fails the appliance; `Restart=on-failure` recovers it.
+- A normal container stop shuts down both servers successfully.
+- ttyd launches one picker per WebSocket connection; closing a browser tab
+  detaches its client without closing host tmux windows.
+- Host tmux windows run the host's `omp`. Container-local execution uses
+  the baked `/usr/local/bin/omp`; mounting home does not change that PATH.
 
 ## Container / Deployment
 
@@ -70,30 +59,36 @@ Caddy (host) ─ /t/* reverse_proxy ─► quadlet omp-web.service        omp-at
   **standalone omp release binary** (`omp-linux-x64` v18.3.2, sha-verified —
   omp lazily loads native addons from the bun cache, which fresh machines
   don't have, so a self-contained binary is the only portable shape).
-  Also bakes ttyd/screen/python3/caddy/git + the custom terminfo.
-- `~/.containers/omp-web/omp-web-entry` — entrypoint: generates the front Caddyfile
-  (webroot prefers the mounted home's `.containers/omp-web/web`, falls back to baked
-  `/opt/omp-web/web`), runs Caddy in background, execs ttyd **on 0.0.0.0**
-  (pasta delivers published ports to the container's eth0, not loopback —
-  binding 127.0.0.1 inside yields 502 through the host Caddy).
-- `~/.containers/omp-web/omp-web-launch` — ttyd's launcher entry: prefers the mounted
-  home's `~/.local/bin/omp-launcher`, falls back to the baked copy.
+  Fedora 44 supplies ttyd/screen/python3/caddy/git/systemd. The omp version
+  and `OMP_SHA256` pin must be updated together.
+- `~/.containers/omp-web/omp-web-entry` — supervises the internal Caddy front
+  and ttyd on **0.0.0.0** (required for pasta port forwarding). Its generated
+  Caddy disables the admin API and config persistence.
+- `~/.containers/omp-web/omp-web-launch` — prefers the mounted repository's
+  executable launcher, falling back to `/opt/omp-web/omp-launcher`.
 - `~/.config/containers/systemd/omp-web.build` — build unit.
 - `~/.config/containers/systemd/omp-web.container` — quadlet → user unit
   `omp-web.service`. Image from `registry.jieniuu8.com/omp-web:latest`
   (unauthenticated, tailnet-only per image-publish house rules).
 
-Build + publish (tag scheme per image-publish skill — `18.3.2-1` = omp
-version 18.3.2, rebuild 1; bump both OMP_VERSION in the Containerfile and the
-tag when omp releases; re-push `latest` and restart):
+Build numbering follows the image-publish skill. The polish build is
+`localhost/omp-web:18.3.2-11`, built and smoke-tested locally; it has **not**
+replaced the running image or been published. It predates the phone hotfix.
+For a future rollout, rebuild current source under the next unused tag
+(the example below uses `18.3.2-12`) during a maintenance window:
 
 ```bash
-podman build -t localhost/omp-web:18.3.2-1 -t localhost/omp-web:latest ~/.containers/omp-web
-podman push localhost/omp-web:18.3.2-1 registry.jieniuu8.com/omp-web:18.3.2-1
-podman push localhost/omp-web:latest registry.jieniuu8.com/omp-web:latest
-podman pull registry.jieniuu8.com/omp-web:latest   # refresh the local ref!
+tag=18.3.2-12
+podman build -t "localhost/omp-web:$tag" ~/.containers/omp-web
+podman push "localhost/omp-web:$tag" "registry.jieniuu8.com/omp-web:$tag"
+podman push "localhost/omp-web:$tag" registry.jieniuu8.com/omp-web:latest
+podman pull registry.jieniuu8.com/omp-web:latest
 systemctl --user restart omp-web.service
 ```
+
+Restart disconnects browser clients and any container-local processes,
+including agent tools running in this appliance. Host tmux windows survive.
+ttyd `-O` rejects cross-origin WebSockets; this is not authentication.
 
 Two custom terminfos (sources: `ttyd-256color.src`, `ttyd-256m.src`), both
 copies of xterm-256color renamed, compiled into the image at /etc/terminfo and
@@ -115,23 +110,30 @@ fresh machines):
 ## Web UI extras
 
 **Mobile** — the wrapper adds what ttyd/xterm.js lack on phones:
-- **Touch bridge**: xterm.js ignores swipes under mouse tracking, so history
-  was unreadable on touch. The wrapper translates vertical swipes into real
-  WheelEvents dispatched on xterm's `.xterm-viewport` (the node its wheel
-  handler is bound to — textarea/element events bubble around it and are
-  silently ignored). Finger down = into history (tmux copy-mode), finger up =
-  back to the bottom, which auto-exits copy-mode (`copy-mode -e`).
-  `touch-action: none` kills pull-to-refresh/rubber-banding.
-- **Key bar** (coarse pointers only): Esc/Tab/arrows/^C/^D/^L — the keys soft
-  keyboards don't have. Arrows honor DECCKM (`ESC O x` vs `ESC [ x`); keys go
-  through xterm's `input()` so the pty sees real keystrokes. Desktop never
-  renders it (`pointer: coarse` media query).
+- **Touch bridge**: capture touch pointers on the stable xterm element.
+  The DOM renderer replaces text rows during scrolling; raw TouchEvents
+  keep targeting the detached original row and previously stopped after
+  the first movement. Captured pointers survive those redraws. With mouse
+  tracking, send wheel events to `.xterm-viewport` for tmux copy-mode;
+  otherwise scroll xterm's own buffer directly without injecting keys.
+  Finger down reads older history; finger up returns toward the bottom.
+  Multi-touch is reserved for pinch zoom, and swipes do not act as clicks.
+- **Key bar** (any coarse pointer, including hybrid devices): Esc/Tab/arrows/
+  ^C/^D/^L/prefix/Detach/Paste, with 44px targets, accessible labels and
+  visible keyboard focus. Actions refocus xterm's textarea rather than the
+  iframe body. Arrows honor DECCKM; the prefix exposes its armed state.
 - **Keyboard-aware sizing**: `interactive-widget=resizes-content` for Android;
-  iOS ignores it, so the wrapper resizes the iframe element to
-  `visualViewport.height` on keyboard open/close — the iframe's own window
-  resize then triggers ttyd's refit (iOS never fires window resize for the
-  keyboard). Plus `viewport-fit=cover` + safe-area padding so the key bar
-  clears the notch/home indicator.
+  the visual-viewport path also covers browsers that do not resize layout
+  for the keyboard. Normalize `visualViewport.height` by its scale, cap at
+  layout height, then assign the iframe an explicit pixel height after
+  safe-area padding and the key bar. Do not skip resize updates while
+  zoomed: that can strand the terminal at its keyboard-open height.
+- **Paste fallback:** denied or unavailable Clipboard API opens a modal for
+  native keyboard/touch paste. Sending uses xterm's mode-aware `paste()`;
+  cancelling sends nothing. OSC52 copy failures show a visible notice.
+- **Magnification:** browser zoom is enabled; pinch zoom does not repeatedly
+  refit terminal columns. Safe-area padding covers the top and both sides
+  as well as the bottom toolbar.
 
 **Status line (omp)** — stock defaults (no `statusLine:` block in
 `~/.omp/agent/config.yml`): `π · model · mode · collab · stream · path · git ·
@@ -190,21 +192,38 @@ client viewing it, so the web terminal always fits and omp's status line stays
 on one line; desktop re-expands when the phone detaches. `set-titles on` +
 `set-titles-string "#S:#{window_id}:#{W}"` publish the current window into the
 title (the wrapper's arg-sync reads it — see Reload-restore).
-**Reading freeze**: tmux re-anchors copy-mode to the bottom on ANY pane resize
-(pos N → 0, even height-only; no tmux option preserves it), which yanked the
-reader back to the live view on every window resize/rotation. Two-layer fix:
-(1) iframe sizing is **JS-owned with explicit px at all times** — CSS `100%`
-let the browser resize the iframe during layout *before* any handler ran
-(the residual yank path in Chrome/Ferdium/keyboard); the wrapper's
-`applyLiveSize()` computes px from window/visualViewport minus the key bar,
-and nothing else ever touches the size. (2) While reading (mouse tracking on,
-no composer visible), `freezeCheck()` pins the frame at its current pixels:
-the pty never resizes, the position survives exactly, black bars show until
-copy-mode exits. The freeze arms instantly on the first wheel (listener
-inside the iframe — parent never sees those events), holds through
-keyboard-open (typing is impossible in copy-mode anyway), and releases the
-moment the composer returns. The conditional pin still guards live-view
-refits (only scrolls if it was at the bottom).
+**Resize policy:** set `tui.resizeScrollback: preserve` in
+`~/.omp/agent/config.yml`. OMP 18.3.2 defaults to `rebuild`, which clears native
+history and replays the transcript after a settled resize. In an isolated
+ttyd/tmux/OMP run, the same 1000×450 → 1000×650 resize emitted 707,101 bytes
+and one history-clear command with `rebuild`, versus 10,358 bytes and no
+history clear with `preserve`. The setting hot-reloaded in that run.
+Preserve leaves old transcript formatting at its previous width. Separately,
+tmux 3.5a re-anchors a resized copy-mode view around its cursor, not its top
+visible line. A cursor left near the bottom made shallow reading jump to
+offset zero even in a plain shell, without any history replay.
+
+Host `~/.tmux.conf` installs `after-copy-mode[50]` to run `send -X top-line`
+when entering copy-mode without an active/present selection. Wheel and page
+scrolling then retain the top-left reading anchor through resize. Existing
+selections are untouched; deliberate cursor movement/search still makes
+that cursor the resize anchor. Width reflow is not pixel-identical.
+The hook is loaded live with `tmux set-hook`, without restarting sessions or
+re-sourcing plugins. Readers already in copy-mode should exit and re-enter
+once to pick up the new anchor.
+
+The wrapper has one sizing path: the smaller of layout height and
+zoom-normalized visual height, with an explicit iframe height after safe
+areas and the key bar. Visual-viewport scrolling tracks keyboard panning
+at normal scale; resize events coalesce through animation frames.
+No forced scroll-to-bottom or scroll-position polling. The earlier anchor fix was
+checked with numbered shell history and a copied OMP session in Chromium,
+Firefox, and a physical Android 15 WebView. On the phone, keyboard opening
+changed the pane from 39×33 to 39×16: offset 2 became 19 while the same text
+remained at the top, and closing restored offset 2. Repeated cycles, actual
+swipe entry, keyboard page-up, selection preservation, and targeting an
+inactive pane were exercised. Actual iOS keyboard behavior remains untested.
+
 **Locale:** the container exports `LANG=C.UTF-8` (`ENV` + entrypoint) —
 tmux marks a client non-UTF8 when its environment is POSIX and then rewrites
 the inner apps' unicode (box drawing etc.) to ACS on output, which mangled
@@ -257,10 +276,10 @@ fallbacks are Shift+drag (browser-native selection; non-Mac — macOS uses
 Option, `macOptionClickForcesSelection`) or the tmux buffer. NOTE: Shift+WHEEL
 does nothing in xterm 5.4 (returns zero lines) — the wheel scroll path is
 copy-mode only. Double-click in copy-mode word-copies without exiting now
-(rebound away from `copy-pipe-and-cancel`). ttyd's reconnect caches its
-`wsUrl` (does not re-read `location.search`), so the iframe `?arg=` mirror is
-not relied on for reconnects — bookmarks/tab restore + the title-watcher sync
-carry the session.
+(rebound away from `copy-pipe-and-cancel`). ttyd caches its initial `wsUrl`.
+The wrapper adapts subsequent same-origin `/t/ws` WebSocket constructions
+to use the current iframe `?arg=`, preserving the selected session after
+network reconnects without reloading a live terminal.
 
 **Keybinds (host tmux)** — `prefix+c` opens a NEW OMP tab in the current
 project (`omp -c` continues its live session; a fresh dir starts one) — not a
@@ -288,20 +307,18 @@ only in split windows). New sessions are tmux windows and never had one.
 | `[tmux <sess>:<idx>] <name> — <path>` | **Host tmux windows** (your live omp tabs, listed first; `*` = active). Attaches via `tmux attach -t @<id>` — the tmux top bar lists all windows; `Ctrl-a n/p/1-8` cycles, `Ctrl-a d` detaches back to the menu. |
 | `(s) [shell] New host shell` | Plain bash as a tmux window — every tmux pane runs on the host, so this *is* a host shell (no systemd bridge needed). |
 | `(t) [tmux] Attach host tmux` | Raw `tmux attach` — most recent session; `Ctrl-a s` lists sessions. |
-| `(w) [new tmux] New omp tab in host tmux...` | Prompts for path + name → `tmux new-window -t =1: -n <name> -c <path>` running `omp --allow-home` (creates session `1` if absent), then attaches. Preferred spawn path — joins the same tabbed universe as the other live sessions (mouse, tabs). |
-| `(n) [new] Start in custom path...` | Path (Tab-complete, Y/n mkdir) → window name → auto-approve y/N → same tmux-window flow as `(w)` with `omp --allow-home`. |
-| `(p) [pick] Resume a session...` | Pick a project → pick a session (UUID + preview) or type a UUID (≥8-char prefix). Reads omp's global store. Placement: if the session is **already running** in a window → selects it (never two omp processes on one uuid); if the project's window is dead → resumes *into* it (id stays stable); otherwise a new window with an auto-deduped name. |
+| `(w) New omp window` / `(n) New in custom path` | Path (Tab-complete, Y/n mkdir), window name, auto-approve y/N; create a window in session `1` and attach its returned stable ID. Paths and flags are passed as argv, never interpolated into shell source. |
+| `(p) Resume session` | Pick a project/session or UUID prefix. Searches panes across tmux sessions for a launch command containing that UUID; selects a matching live pane, otherwise revives a dead project pane or creates a new window. Fresh omp processes without a UUID in their launch command cannot be deduplicated by this method. |
 
-All entries create/attach host-tmux windows; the launcher no longer creates
-GNU screen sessions (screen stays in the image as the portable-appliance
-fallback only). Legacy screens were migrated: find the running omp's cwd +
-newest session jsonl, `tmux new-window -t '=1:' -n <name> -c <cwd>` with
-`omp --resume <uuid> --allow-home`, then `screen -S <name> -X quit` — never
-run two omp processes on one session uuid. Window names must be unique in session 1 — collisions select
-the existing window instead of spawning a duplicate. Note: `tmux new-window
--t 1` is ambiguous with session "1" named "1" (parses as window *index* 1 →
-"index in use") — always target `-t =1:` for new windows and `-t =1` for
-list/has-session.
+New entries create tmux windows, using the host socket when mounted or a
+local server otherwise. Legacy screen sessions remain attachable. Window
+names are deduplicated with numeric suffixes. New windows use `-t =1:`;
+stable `@window` and `%pane` IDs prevent index-shift mistakes during attach
+and recovery. Dead-pane recovery does not force-kill a pane that became live.
+
+Menus use the actual terminal width, single-column project/session pickers
+and Unicode-aware label truncation. EOF cancels a prompt; numeric choices
+are bounded before shell arithmetic.
 
 **Window lifecycle** — omp windows live in host tmux, so they survive
 container restarts, browser closes, and reboots (tmux resurrect restores the
@@ -319,10 +336,12 @@ title itself while running (model > path > git).
 
 **Keybindings** (printed on every menu redraw — the host-tmux ones, prefix is
 `Ctrl-a`): `Ctrl-a d` detach (back to this menu), `Ctrl-a [` scroll mode
-(PgUp/PgDn, `/` and `?` search, `q` exit), `prefix j` live JSONL view of the
-current pane (tmux popup running `omp-jsonl-view --popup` over
-`omp-jsonl-pretty`: `YOU`/`OMP` blocks, tool calls as one-liners, tool
-results truncated, compaction markers, session titles).
+(PgUp/PgDn, `/` and `?` search, `q` exit), `prefix j` transcript snapshot
+(tmux popup running `omp-jsonl-view --popup` over `omp-jsonl-pretty`).
+The viewer resolves the newest JSONL whose header cwd matches the pane.
+It is not a live stream and may not be the active session when several
+sessions share a cwd. Malformed events and terminal control characters are
+filtered; assistant string content and narrow separators render correctly.
 
 ## Project Session Discovery
 
@@ -334,54 +353,37 @@ launcher scans the newest JSONL per dir for its `session` line's `cwd`; dirs
 whose cwd no longer exists are filtered from `[pick]`. To drop an old
 project's history: `rm -rf ~/.omp/agent/sessions/<munged>/`.
 
-## Status Bar
-
-`~/.containers/omp-web/omp-status <screen-name>` feeds screen's `backtick 0 30 30 …`
-in each session's rc — output like `ctx 100k │ $1.23 │ 5m`:
-- **ctx** — most recent assistant turn's `input + cacheRead + cacheWrite`
-  from the session JSONL (no cap/percentage: omp sessions span models with
-  different context windows).
-- **$** — cumulative `usage.cost`.
-- **age** — time since the last message.
-
-Resolution: find the screen server PID via `pgrep` (never `screen -ls` from
-inside a backtick — one wedged server deadlocks every attach; seen 2026-06-06),
-BFS its descendants for the `omp` process, read its cwd, take the newest
-JSONL in that cwd's dir. Degrades to `ctx -` / `—`, never fails the bar.
-
-Unlike the old Claude Code version there are **no network calls** — no OAuth
-usage endpoint, no 5h-cap segment (provider-agnostic).
-
 ## Shell Integration
 
 `~/.bashrc.d/omp-web.sh` → `~/.containers/omp-web/omp-web.sh`:
 
 ```bash
-omp-attach() { "$HOME/.local/bin/omp-launcher"; }
+omp-attach() {
+    local launcher="$HOME/.containers/omp-web/omp-launcher"
+    [[ -x "$launcher" ]] || launcher=/opt/omp-web/omp-launcher
+    "$launcher" "$@"
+}
 ```
 
 `omp-attach` in any local terminal = identical launcher as the browser.
 
 ## URL / Session Restore
 
-`https://omp.jieniuu8.com/?arg=<suffix>` attaches straight to
-`omp-<suffix>`; the address bar tracks the active session automatically.
+`https://omp.jieniuu8.com/?arg=tmux-<N>` attaches stable host tmux window
+`@N`. `?arg=tmux` attaches the most recent tmux session; legacy screen
+suffixes remain supported. Invalid/stale targets return to the menu.
 
-1. **ttyd `-a`** forwards `?arg=<x>` as the launcher's `$1`; the direct-attach
-   guard sanitizes it and only acts if a live `omp-<x>` screen exists (bogus
-   args just show the menu).
+1. **ttyd `-a`** forwards `?arg=<x>` to the launcher's direct-attach guard.
 2. **ttyd `-b /t`** mounts ttyd under `/t` so it lives behind the wrapper page
    at `/` (same-origin).
-3. **`web/index.html`** iframes `/t/`, polls the iframe's `document.title`
-   (driven by the launcher's OSC 0 `set_title` → `omp-<suffix>`), parses the
-   leading `/^omp-([A-Za-z0-9_-]+)/` token, and `history.replaceState`s the
-   arg onto **both** the address bar and the iframe URL — the iframe copy is
-   what makes ttyd's WS-reconnect (e.g. after a Caddy reload) re-attach
-   instead of kicking back to the menu.
+3. **`web/index.html`** polls the iframe title, recognizes tmux window IDs
+   and launcher/screen titles, and updates both URLs with `replaceState`.
+   A small WebSocket adapter applies that current arg to ttyd reconnects
+   because ttyd itself caches its original URL.
 
-Limitation: one title at a time (multiple browser clients boot each other via
-`-A -D -RR`). Direct-attach only attaches existing screens; after a reboot,
-`[pick]` is the way back.
+Multiple tmux clients may attach simultaneously; host `window-size smallest`
+fits the narrowest client. Legacy screen attaches still use `-A -D -RR`
+and can detach another client. Missing windows require `[pick]` recovery.
 
 ## Flag Prompt
 
@@ -399,10 +401,9 @@ prompt (its mode is fixed). Other flags (`--model`, `--plan-yolo`,
 
 ```
 ~/.containers/omp-web/
-├── CLAUDE.md                 # this file
+├── OMP.md                    # this file
 ├── Containerfile             # image build (fedora + ttyd/screen/python3 + terminfo)
 ├── omp-launcher              # main bash launcher (source of truth; ~/.local/bin symlink)
-├── omp-status                # python status-bar feed (ctx/cost/age) + --jsonl resolver
 ├── omp-jsonl-view            # bash wrapper for Ctrl-A j (resolves JSONL, pipes to less)
 ├── omp-jsonl-pretty          # python formatter: omp JSONL → readable transcript
 ├── omp-web.sh                # omp-attach shell function
@@ -421,17 +422,53 @@ prompt (its mode is fixed). Other flags (`--model`, `--plan-yolo`,
 ## Caddy
 
 ```caddyfile
-# omp — Web terminal for omp agent sessions (screen-backed) | dev
+# omp — Web terminal for omp agent sessions (tmux-backed) | dev
 omp.jieniuu8.com {
-	handle /t/* { reverse_proxy 127.0.0.1:7682 }
-	handle { root * /home/jieniu/.containers/omp-web/web; file_server }
+	@nottailnet not remote_ip 100.64.0.0/10 fd7a:115c:a1e0::/48
+	route {
+		respond @nottailnet 403
+		handle /t/* {
+			reverse_proxy 127.0.0.1:7682
+		}
+		handle {
+			root * /home/jieniu/.containers/omp-web/web
+			file_server
+		}
+	}
 }
 ```
 
-Deploy edits with `sudo ~/caddy/deploy.sh` (regenerates the dashboard from
-the annotation comment).
+The tailnet guard is staged in `~/caddy/Caddyfile`, **not yet deployed**.
+Deploy with `sudo ~/caddy/deploy.sh` (requires host administrator access and
+regenerates the dashboard). `route` is essential: a bare `respond` is sorted
+after `handle` blocks and would not protect the terminal. The rule uses the
+connection's remote IP, not spoofable forwarded headers. Devices must use
+Tailscale. DNS alone does not protect a shared HTTPS listener.
 
 ## History
+
+- 2026-09-27 — corrected phone regressions from the polish pass. Continuous
+  Pointer Events capture replaces the detached-row TouchEvent path; zoom
+  no longer freezes height updates, and iframe height is explicit.
+  Verified on a physical Moto G7 Play / Android 15 WebView: swipes moved
+  numbered tmux history 17 lines in each direction; keyboard open/close
+  changed the frame 552 → 290 → 552px and terminal 33 → 17 → 33 rows,
+  retaining the same top history line. Chromium also recovered full height
+  across repeated viewport changes while zoomed to 1.4×. Physical iOS
+  behavior remains untested.
+- 2026-09-27 — cross-device polish: mobile focus/clipboard/prefix controls,
+  zoom and safe-area sizing, session-aware WebSocket reconnects, narrow
+  menus, argv-safe launches/recovery and repaired transcript viewer.
+  Chromium exercised desktop, 320px/390px phones, Android emulation,
+  landscape and iPad layouts; actual terminal key/paste/swipe events and
+  reconnect handshakes were observed. A 390×844 → 390×440 viewport change
+  refit 55 → 26 rows with the toolbar at the bottom. This is not physical
+  iOS keyboard/IME or screen-reader certification.
+- 2026-09-27 — appliance supervision and WebSocket origin checking verified
+  with disposable containers; local image `18.3.2-11` builds with pinned omp
+  checksum. Staged Caddy guard denies non-tailnet/forged-XFF requests with
+  403 and permits a real tailnet-source request with 200. Production image
+  and system Caddy were not restarted/reloaded during this review.
 
 - 2026-09-26 — removed the wrapper chip bar + `sessions.json` publisher (user
   request; the tmux status bar covers session switching). Root cause of its

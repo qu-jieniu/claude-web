@@ -1,59 +1,79 @@
 #!/usr/bin/env bash
 # omp-jsonl-view — open the active omp session's JSONL in a pager.
 #
-# Two resolution paths:
-#   omp-jsonl-view            — screen: resolves via $STY and
-#                               `omp-status --jsonl $STY-suffix` (the screenrc
-#                               Ctrl-A j binding inside omp-* screens).
-#   omp-jsonl-view --popup    — tmux: resolves the JSONL from the popup's
-#                               start directory (the binding passes
-#                               -d '#{pane_current_path}'); wired to the
-#                               tmux prefix+j popup binding.
+# Resolve the newest transcript for a cwd from the session headers:
+#   omp-jsonl-view --popup    — tmux popup started in the pane's cwd.
+#   omp-jsonl-view <cwd>      — explicit project directory.
+#   omp-jsonl-view            — legacy screen name, otherwise current cwd.
 #
 # `q` exits less; `/` searches. The pretty-printer dumps existing content
 # and exits at EOF, so less shows (END) at the bottom and behaves like a
 # normal pager. +G jumps to the end on open so the most-recent turn is
 # visible; user scrolls up for older content. To see new turns appended
 # after opening, close (q) and re-press the binding.
-set -e
+set -euo pipefail
 
-# Prefer the live-editable home copy; fall back to the baked appliance copy.
-WEB_DIR="$HOME/.containers/omp-web"
-[ -x "$WEB_DIR/omp-status" ] || WEB_DIR=/opt/omp-web
-
-if [ "${1:-}" = "--popup" ]; then
-    # tmux popup mode: the binding starts the popup in the pane's cwd
-    # (display-popup -d '#{pane_current_path}'), so the transcript is the
-    # newest JSONL for $PWD's sessions dir.
-    jsonl=$("$WEB_DIR/omp-status" --jsonl-cwd "$(pwd)" 2>/dev/null) || true
-    if [ -z "$jsonl" ] || [ ! -f "$jsonl" ]; then
-        printf 'no JSONL found for %s\n' "$(pwd)" >&2
-        printf '(plain shells and freshly-started sessions have nothing to view)\n' >&2
-        read -n1 -s -r -p '[any key to close]'
-        exit 1
-    fi
-elif [ -n "${1:-}" ]; then
-    jsonl=$("$WEB_DIR/omp-status" --jsonl-cwd "$1" 2>/dev/null) || true
-    if [ -z "$jsonl" ] || [ ! -f "$jsonl" ]; then
-        printf 'no JSONL found for %s\n' "$1" >&2
-        printf '(plain shells and freshly-started sessions have nothing to view)\n' >&2
-        read -n1 -s -r -p '[any key to close]'
-        exit 1
-    fi
-else
-    sname="${STY##*.}"
-    if [ -z "$sname" ]; then
-        printf 'error: no cwd argument and not inside a screen session (STY unset)\n' >&2
-        read -n1 -s -r -p '[any key to close]'
-        exit 1
-    fi
-    jsonl=$("$WEB_DIR/omp-status" --jsonl "$sname" 2>/dev/null) || true
-    if [ -z "$jsonl" ] || [ ! -f "$jsonl" ]; then
-        printf 'no JSONL found for screen %s\n' "$sname" >&2
-        printf '(plain shells and freshly-started sessions have nothing to view)\n' >&2
-        read -n1 -s -r -p '[any key to close]'
-        exit 1
-    fi
+# Use the formatter beside this script (works for symlinks and baked copies).
+WEB_DIR=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
+mode=cwd
+target="${1:-$PWD}"
+if [ "$target" = "--popup" ]; then
+    target="$PWD"
+elif [ "$#" -eq 0 ] && [ -n "${STY:-}" ]; then
+    mode=screen
+    target="${STY#*.}"
 fi
 
+jsonl=$(python3 - "$HOME/.omp/agent/sessions" "$mode" "$target" "$HOME" <<'PY'
+import json, os, re, sys
+from pathlib import Path
+
+root, mode, target, home = sys.argv[1:]
+def screen_name(cwd):
+    if cwd == home:
+        return 'home'
+    name = re.sub(r'_+', '_', re.sub(r'[^a-zA-Z0-9_-]', '_', os.path.basename(cwd)))
+    for prefix in ('omp-', 'claude-'):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name or 'session'
+
+matches = []
+for path in Path(root).glob('*/*.jsonl'):
+    try:
+        with path.open(encoding='utf-8', errors='replace') as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict) or not isinstance(event.get('cwd'), str):
+                    continue
+                cwd = event['cwd']
+                if (mode == 'cwd' and os.path.realpath(cwd) == os.path.realpath(target)) or (
+                    mode == 'screen' and screen_name(cwd) == target.removeprefix('omp-')
+                ):
+                    matches.append((path.stat().st_mtime_ns, str(path), cwd))
+                break
+    except OSError:
+        continue
+if mode == 'screen' and len({row[2] for row in matches}) > 1:
+    print('Ambiguous screen name; pass the project directory explicitly.', file=sys.stderr)
+    sys.exit(1)
+if matches:
+    print(max(matches)[1])
+PY
+) || exit 1
+
+if [ -z "$jsonl" ]; then
+    printf 'No transcript found for %s\n' "$target" >&2
+    printf 'New sessions and plain shells may have no saved messages.\n' >&2
+    if [ -t 0 ]; then
+        read -n1 -s -r -p '[any key to close]' || true
+    fi
+    exit 1
+fi
+
+# The snapshot opens at the latest turn; q closes, / searches.
 "$WEB_DIR/omp-jsonl-pretty" "$jsonl" | less -R +G

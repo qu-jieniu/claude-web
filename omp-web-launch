@@ -4,7 +4,7 @@
 # falls back to the baked copy on fresh machines without one.
 set -euo pipefail
 
-if [ -x "${HOME}/.local/bin/omp-launcher" ]; then
-    exec "${HOME}/.local/bin/omp-launcher" "$@"
+if [ -x "${HOME}/.containers/omp-web/omp-launcher" ]; then
+    exec "${HOME}/.containers/omp-web/omp-launcher" "$@"
 fi
 exec /opt/omp-web/omp-launcher "$@"
