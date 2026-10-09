@@ -3,13 +3,13 @@ Description=Persistent host tmux server for omp web terminals
 
 [Service]
 Type=simple
-Environment=OMP_WEB_ROOT=%h/.containers/omp-web-rebuild
+Environment=OMP_WEB_ROOT=%h/.containers/omp-web
 Environment=LANG=C.UTF-8
 Environment=LC_ALL=C.UTF-8
 UnsetEnvironment=TMUX TMUX_PANE OMP_TMUX_SOCKET
 WorkingDirectory=%h
 ExecStartPre=/usr/bin/install -d -m 0700 %h/.omp/run/host-tmux
-ExecStart=/usr/bin/tmux -D -S %h/.omp/run/host-tmux/default -f %h/.containers/omp-web-rebuild/tmux.conf
+ExecStart=/usr/bin/tmux -D -S %h/.omp/run/host-tmux/default -f %h/.containers/omp-web/tmux.conf
 Restart=on-failure
 RestartSec=2
 

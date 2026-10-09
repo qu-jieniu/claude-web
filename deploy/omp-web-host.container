@@ -6,15 +6,15 @@ Requires=omp-web-tmux.service
 After=omp-web-tmux.service
 
 [Container]
-ContainerName=omp-web-rebuild-host
-Image=localhost/omp-web-rebuild:18.3.2-52
+ContainerName=omp-web-host
+Image=localhost/omp-web:18.3.2-52
 PublishPort=127.0.0.1:17688:8080
 Volume=%h:/home/jieniu
 Volume=%t/systemd:/run/user/1000/systemd
 Volume=%t/bus:/run/user/1000/bus
 Volume=/etc/localtime:/etc/localtime:ro
 Environment=HOME=/home/jieniu
-Environment=OMP_WEB_ROOT=/home/jieniu/.containers/omp-web-rebuild
+Environment=OMP_WEB_ROOT=/home/jieniu/.containers/omp-web
 Environment=OMP_TMUX_SOCKET=/home/jieniu/.omp/run/host-tmux/default
 Environment=OMP_TMUX_REQUIRE_SERVER=1
 Environment=XDG_RUNTIME_DIR=/run/user/1000

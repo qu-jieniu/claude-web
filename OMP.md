@@ -1,7 +1,7 @@
 # omp-web
 
 Persistent omp terminals in a browser, rebuilt independently on the orphan branch
-`rebuild/from-scratch`. The host-connected deployment now serves
+`main`. The host-connected deployment now serves
 `https://omp.jieniuu8.com/` through `127.0.0.1:17688`. The legacy implementation
 is archived at `~/.containers-arc/omp-web` (still serving its own
 `omp-web.service`, and still the git repository this worktree hangs off); it was
@@ -45,11 +45,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web-rebuild:18.3.2-52 .
-podman run --rm -it --name omp-web-rebuild \
+podman build -t localhost/omp-web:18.3.2-52 .
+podman run --rm -it --name omp-web-preview \
   -p 127.0.0.1:17685:8080 \
-  -v omp-web-rebuild-home:/root \
-  localhost/omp-web-rebuild:18.3.2-52
+  -v omp-web-home:/root \
+  localhost/omp-web:18.3.2-52
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -59,8 +59,8 @@ alive across container removal/restart. Authenticate using omp's `/login` when
 needed. The image includes the real standalone omp executable, not a placeholder.
 
 For a persistent isolated user service, install
-`deploy/omp-web-rebuild.container` into `~/.config/containers/systemd/`, then run
-`systemctl --user daemon-reload` and `systemctl --user start omp-web-rebuild`.
+`deploy/omp-web-preview.container` into `~/.config/containers/systemd/`, then run
+`systemctl --user daemon-reload` and `systemctl --user start omp-web-preview`.
 This unit has its own name, image, port and home volume. It does not replace
 `omp-web.service`. Stop the foreground preview before starting it on the same port.
 
@@ -260,7 +260,7 @@ rebuilt the frontend, launcher, viewer, tmux defaults and appliance supervision.
 sequence sanitization, malformed-event recovery, header-based cwd selection, and
 refusing to display unrelated sessions.
 
-The final `localhost/omp-web-rebuild:18.3.2-2` image built and launched its pinned
+The final `localhost/omp-web:18.3.2-2` image built and launched its pinned
 omp binary in Chromium. Killing ttyd made the supervisor reap Caddy and exit 1;
 a normal stop exited 0. A foreign-Origin WebSocket handshake was rejected by
 ttyd (Caddy surfaces the upstream rejection as 502). A fresh isolated home has
@@ -285,7 +285,7 @@ Copy attempts a gesture-bound browser copy first, so plain HTTP can work without
 the secure-context Clipboard API; the native copy menu remains the fallback.
 Verified on the physical Android device: long-press selected `persistent`, and
 both partial-selection and Select-all copy commands reported success.
-Image `localhost/omp-web-rebuild:18.3.2-3` includes this update.
+Image `localhost/omp-web:18.3.2-3` includes this update.
 
 ### Host-connected preview
 
@@ -312,12 +312,12 @@ User-systemd and bus mounts enable the existing host-bridge integration.
 the same launcher, overlay, frontend and viewer. Run `npm ci && npm run build`
 when recreating the worktree: its generated `web/vendor/` must exist.
 
-`deploy/omp-web-rebuild-host.container` records the appliance deployment;
+`deploy/omp-web-host.container` records the appliance deployment;
 `deploy/omp-web-tmux.service` owns the persistent host server. Install them into
 `~/.config/containers/systemd/` and `~/.config/systemd/user/`, respectively,
 then run `systemctl --user daemon-reload` and
 `systemctl --user enable --now omp-web-tmux.service`. Start the appliance with
-`systemctl --user start omp-web-rebuild-host.service`. Both start with the
+`systemctl --user start omp-web-host.service`. Both start with the
 lingering user manager's default target. Adapt paths and UID for another host.
 The old transient host preview is stopped.
 
@@ -335,7 +335,7 @@ terminal. It appears during connection/reconnection or failure with the manual
 Reconnect action. Verified with a real WebSocket close: hidden while connected,
 visible on disconnect, hidden again after automatic reconnect. Explicit grid
 rows keep the mobile keybar below the terminal when the header is hidden.
-Image `localhost/omp-web-rebuild:18.3.2-4` includes this behavior.
+Image `localhost/omp-web:18.3.2-4` includes this behavior.
 
 ### Phone toolbar order
 
@@ -500,7 +500,7 @@ this fix; the user explicitly chose to keep the current session alive.
 **Web restarts are now safe for the active host-owned sessions:**
 
 ```sh
-systemctl --user restart omp-web-rebuild-host.service
+systemctl --user restart omp-web-host.service
 ```
 
 Production now uses the dedicated host socket. Browser clients automatically
@@ -570,7 +570,7 @@ production quadlet. The cache reused the `18.3.2-11` image content, SHA-256
 At this rollout the host service was already active; the prior staged-status
 notes no longer described the running deployment.
 
-Restarted `omp-web-rebuild-host.service` twice. Both times host tmux PID 2644,
+Restarted `omp-web-host.service` twice. Both times host tmux PID 2644,
 the current OMP PID 272051, and test shell PID 284005 retained their original
 start times. Both panes remained alive. The HTTPS browser recorded two
 disconnected → connecting → connected transitions at the same window URL;
@@ -641,7 +641,7 @@ Exercised in Chromium mobile emulation:
 5. Long-press on Backspace in the middle of a line deleted the inserted text cleanly.
 
 All seven launcher and transcript regressions passed. Image `18.3.2-14` was built
-and deployed to `omp-web-rebuild-host.service`; all running host OMP and shell
+and deployed to `omp-web-host.service`; all running host OMP and shell
 processes remained alive with their original PIDs.
 
 ### Terminal font zoom buttons (`18.3.2-15`)
@@ -667,7 +667,7 @@ Exercised in Chromium mobile emulation:
 5. Long-press on `A+` (held 550ms): smoothly increased font size from 13px to 17px (36 cols × 39 rows).
 
 Unit tests (7/7) passed. Image `18.3.2-15` was built and deployed to
-`omp-web-rebuild-host.service`; all host tmux sessions and OMP PIDs remained alive.
+`omp-web-host.service`; all host tmux sessions and OMP PIDs remained alive.
 
 ### Mobile file attachments and upload service (`18.3.2-16`)
 
@@ -705,7 +705,7 @@ Exercised and verified:
      direct paste of `@/home/jieniu/.omp/uploads/...`.
    - Verified exact file contents on disk (`~/.omp/uploads/`).
 
-Image `18.3.2-16` was built and deployed to `omp-web-rebuild-host.service`; all host
+Image `18.3.2-16` was built and deployed to `omp-web-host.service`; all host
 tmux sessions and OMP processes remained active without interruption.
 
 ### Viewport resize stabilization and copy-mode auto-exit (`18.3.2-17`)
@@ -745,7 +745,7 @@ Investigated and resolved duplicate text appearing in scrollback during mobile s
      automatically exits copy-mode upon reaching the bottom of history.
 
 Verified with unit tests (13/13 passing), verified copy-mode auto-exit in tmux,
-built image `18.3.2-17`, and deployed to `omp-web-rebuild-host.service` without
+built image `18.3.2-17`, and deployed to `omp-web-host.service` without
 interrupting active host tmux panes.
 
 ### Touch focus suppression and iPad keyboard handling (`18.3.2-18`)
@@ -761,7 +761,7 @@ interrupting active host tmux panes.
   - If the software keyboard is already open, toolbar interactions maintain focus without
     closing or flickering the keyboard.
 
-Built image `18.3.2-18`, deployed to `omp-web-rebuild-host.service`; all host tmux panes
+Built image `18.3.2-18`, deployed to `omp-web-host.service`; all host tmux panes
 and running OMP processes remained active without interruption.
 
 ### iOS backgrounding resize protection and detached default dimensions (`18.3.2-19`)
@@ -793,7 +793,7 @@ when leaving the app to run in the background on iOS:
      live host server so that even if all clients detach, panes retain their full 84-column width.
 
 Verified with unit tests (13/13 passing), built image `18.3.2-19`, and deployed to
-`omp-web-rebuild-host.service`; all host tmux panes and OMP processes remained active.
+`omp-web-host.service`; all host tmux panes and OMP processes remained active.
 
 ### Window-size manual override clearance (`18.3.2-19`)
 
@@ -829,7 +829,7 @@ single-display architecture established in `aerc web` (`screen -d -R`):
 
 Verified with unit tests (14/14 passing, including explicit takeover and detachment
 verification in `tests/test_launcher.py`), built image `18.3.2-20`, and deployed to
-`omp-web-rebuild-host.service` without interrupting live host panes.
+`omp-web-host.service` without interrupting live host panes.
 
 ### Discord alerts and visibility-based presence (`18.3.2-21`)
 
@@ -886,7 +886,7 @@ back as `attended: true` (860ms old); 16 seconds with no further heartbeats
 (simulating a minimized tab) read back as `attended: false` (>15s threshold),
 confirming the exact scenario this was built to catch. Added
 `test_presence_heartbeat_touches_file` to `tests/test_upload.py`; all 15 tests
-pass. Built image `18.3.2-21` and deployed to `omp-web-rebuild-host.service`
+pass. Built image `18.3.2-21` and deployed to `omp-web-host.service`
 without restarting any live host pane.
 
 Delivery itself was verified live against the real Discord API, not mocked:
@@ -939,7 +939,7 @@ posted a genuine Discord message; once with `$TMUX_PANE=%2` (`web-rebuild`'s
 own pane) — returned `"skipped: …"` with no message sent. Added
 `test_presence_heartbeat_records_window` to `tests/test_upload.py`; all 16
 tests pass. Built image `18.3.2-22`, deployed to
-`omp-web-rebuild-host.service`; all three pre-existing host panes (`strategy`,
+`omp-web-host.service`; all three pre-existing host panes (`strategy`,
 `web-rebuild`, `trader-go`) remained unchanged throughout.
 
 ### Canvas renderer, replacing jittery DOM rendering (`18.3.2-23`)
@@ -965,7 +965,7 @@ rendering artifacts) and scrolled into real tmux scrollback (copy-mode
 `[7/250]` indicator, content rendered correctly) to confirm both static
 rendering and scroll are visually correct under the new renderer. 16/16 unit
 tests pass (unaffected — this is frontend-only). Built image `18.3.2-23`,
-deployed to `omp-web-rebuild-host.service`; all three pre-existing host panes
+deployed to `omp-web-host.service`; all three pre-existing host panes
 (`strategy`, `web-rebuild`, `trader-go`) remained unchanged.
 
 ### Astigmatism-friendly palette (`18.3.2-24`)
@@ -995,7 +995,7 @@ the actual deployed terminal and read the background pixel directly off the
 xterm canvas via `getImageData` — `#161a21`, an exact match, confirming the
 rendered output (not just the source) carries the new palette. 16/16 unit
 tests pass (frontend-only change). Built image `18.3.2-24`, deployed to
-`omp-web-rebuild-host.service`; all pre-existing host panes remained
+`omp-web-host.service`; all pre-existing host panes remained
 unchanged throughout.
 
 ### Key bar on all devices, not just touch (`18.3.2-25`)
@@ -1019,7 +1019,7 @@ Clicked Attach and confirmed the click reaches the hidden file input
 composer's existing Attach button already used, so screenshot/file upload
 now works via mouse exactly like it did via touch. 16/16 unit tests pass
 (frontend-only change). Built image `18.3.2-25`, deployed to
-`omp-web-rebuild-host.service`; all six pre-existing host panes remained
+`omp-web-host.service`; all six pre-existing host panes remained
 unchanged.
 
 ### Compact keybar on mouse, muted ANSI palette (`18.3.2-26`)
@@ -1051,7 +1051,7 @@ viewport (390×844, `hasTouch:true`) the same button measured 44px with
 assumed from the CSS. Read `window.term.options.theme` off the live xterm
 instance and confirmed it carries the exact new hex values (not just present
 in the source bundle). 16/16 unit tests pass (frontend-only). Built image
-`18.3.2-26`, deployed to `omp-web-rebuild-host.service`; all six
+`18.3.2-26`, deployed to `omp-web-host.service`; all six
 pre-existing host panes remained unchanged.
 
 ### Stuck drag-selection auto-scroll on desktop (`18.3.2-27`)
@@ -1091,7 +1091,7 @@ multi-step drag — a tooling-fidelity gap (synthetic input apparently doesn't
 carry whatever real trackpad/mouse hardware characteristics tmux's
 mouse-tracking pipeline keys on), not evidence against the fix. 16/16 unit
 tests pass (frontend-only change, unaffected). Built image `18.3.2-27`,
-deployed to `omp-web-rebuild-host.service`; all six pre-existing host panes
+deployed to `omp-web-host.service`; all six pre-existing host panes
 remained unchanged. Please confirm directly on your Mac after refreshing —
 if it still happens, the next step is capturing the WebSocket bytes during a
 real drag to see exactly what tmux receives.
@@ -1124,7 +1124,7 @@ itself), the identical release retargeted to `#terminal` instead — exactly
 the guarantee needed to recover a release that lands on Safari's own chrome.
 The old reactive mousemove check stays as a defensive fallback in case
 capture is ever lost mid-drag. 16/16 unit tests pass (frontend-only). Built
-image `18.3.2-28`, deployed to `omp-web-rebuild-host.service`; all six
+image `18.3.2-28`, deployed to `omp-web-host.service`; all six
 pre-existing host panes remained unchanged.
 
 ### `18.3.2-28` made it worse; reverted, fixed at the real root (`18.3.2-29`)
@@ -1167,7 +1167,7 @@ already-running host tmux server via `tmux bind-key` (confirmed with
 `setPointerCapture` match is pre-existing, unrelated touch-surface code for
 the key bar's own multitouch handling, filtered to `pointerType === 'touch'`
 - verified by reading it, not assumed). 16/16 unit tests pass. Built image
-`18.3.2-29`, deployed to `omp-web-rebuild-host.service`; all six pre-existing
+`18.3.2-29`, deployed to `omp-web-host.service`; all six pre-existing
 host panes remained unchanged throughout this and the prior two releases.
 
 ### Select dialog captures the full buffer, not just the viewport (`18.3.2-30`)
@@ -1202,7 +1202,7 @@ and opened scrolled to the bottom. Measured full-buffer extraction cost
 beforehand (~0.04ms/line on the live buffer, so ~400ms worst case at the
 10000-line cap) before committing to the design, rather than guessing it
 was fast enough. 16/16 unit tests pass. Built and deployed to
-`omp-web-rebuild-host.service`; all six pre-existing host panes remained
+`omp-web-host.service`; all six pre-existing host panes remained
 unchanged.
 
 ### Vanilla tmux mouse config - and the real bug was ours (`18.3.2-31`)
@@ -1237,7 +1237,7 @@ the throwaway vanilla instance's `list-keys` output, and that
 binding for it there - scrolling down at the root has no default meaning).
 16/16 unit tests pass (tmux-only change, untested by the suite but verified
 by direct comparison instead). Built image `18.3.2-31`, deployed to
-`omp-web-rebuild-host.service` and pushed live to the running tmux server;
+`omp-web-host.service` and pushed live to the running tmux server;
 all six pre-existing host panes remained unchanged throughout.
 
 
@@ -1272,7 +1272,7 @@ live chat window, confirmed `#{scroll_position}` moved from empty to `145`
 and `#{pane_in_mode}` flipped to `1` - then immediately cancelled
 copy-mode on the real session to restore the live view before anything was
 missed. 16/16 unit tests pass (tmux-only change). Built image `18.3.2-32`,
-deployed to `omp-web-rebuild-host.service`; all seven pre-existing host
+deployed to `omp-web-host.service`; all seven pre-existing host
 panes remained unchanged.
 
 
@@ -1316,7 +1316,7 @@ Android, Mac, Windows, any browser, regardless of what the live app's mouse
 mode happens to be at that instant. That remains the one universally
 reliable path, especially on mobile where there is no Option/Shift key at
 all. 16/16 unit tests pass (frontend-only addition). Built image
-`18.3.2-33`, deployed to `omp-web-rebuild-host.service`; all seven
+`18.3.2-33`, deployed to `omp-web-host.service`; all seven
 pre-existing host panes remained unchanged.
 
 
@@ -1370,7 +1370,7 @@ exiting (verified against a clean instance where `k` moves 1->0 and `j`
 moves 0->1->2, clamping at boundaries), Scroll again exits
 (`pane_in_mode=0`), and wheel input produces no mode change at all. 16/16
 unit tests pass (frontend-only). Built images `18.3.2-34` and `18.3.2-35`,
-deployed to `omp-web-rebuild-host.service`; all seven pre-existing host
+deployed to `omp-web-host.service`; all seven pre-existing host
 panes remained unchanged and none were left in copy-mode.
 
 ### Drag-select inside scroll mode keeps the toggle in sync (`18.3.2-36`)
@@ -1390,7 +1390,7 @@ listener on the terminal surface that clears the toggle, the same treatment
 Enter and Escape already get. Verified live: enter scroll mode (toggle
 `true`), drag-select inside it, toggle resets to `false` and tmux's own
 `pane_in_mode` is `0` - client and server agree. 16/16 unit tests pass.
-Built image `18.3.2-36`, deployed to `omp-web-rebuild-host.service`; all
+Built image `18.3.2-36`, deployed to `omp-web-host.service`; all
 seven pre-existing host panes unchanged.
 ### Drag-select restored, and copy now reaches the browser clipboard (`18.3.2-37`)
 
@@ -1436,7 +1436,7 @@ instrumenting the page - i.e. the pane-to-clipboard chain is intact
 end-to-end. Clipboard writes are still best-effort per browser policy (Safari
 can decline without a direct user gesture); the tmux buffer is the fallback,
 and the Select button remains the guaranteed native path. 16/16 unit tests
-pass. Built image `18.3.2-37`, deployed to `omp-web-rebuild-host.service`;
+pass. Built image `18.3.2-37`, deployed to `omp-web-host.service`;
 all seven pre-existing host panes unchanged, none left in copy-mode, and the
 test sessions/clients used for verification were removed.
 ### Web-terminal UX research batch (`18.3.2-37`, frontend only)
@@ -1902,7 +1902,7 @@ search test no longer depends on the shell's prompt text (it searched for
 written into the fixture. `package-lock.json` was regenerated - it still listed
 `@xterm/addon-clipboard` and `js-base64`, removed from `package.json` earlier.
 
-Image `18.3.2-40`, deployed to `omp-web-rebuild-host.service`. Verified after the
+Image `18.3.2-40`, deployed to `omp-web-host.service`. Verified after the
 restart: the same host tmux window reconnects, the dialog lists 402 lines and 111
 matches with the new 6.2:1 match colour, the keybar still sends its key
 (`[48, 9]` = Tab), and all nine pre-existing pane PIDs are unchanged - the
@@ -1929,7 +1929,7 @@ is the launcher-menu wheel path.
 Verified through the UI against tmux's own counter: one notch at `deltaY` -100
 emits 1 report and moves `scroll_position` 18 -> 21; wheel-down moves 21 -> 18;
 two notches move 0 -> 6. A 100px touch swipe still emits 7 reports along the
-untouched path. Image `18.3.2-41`, deployed to `omp-web-rebuild-host.service`;
+untouched path. Image `18.3.2-41`, deployed to `omp-web-host.service`;
 all nine pre-existing pane PIDs unchanged.
 
 ### Scroll button removed and keybar arrows fixed (`18.3.2-42`, frontend)
@@ -1961,7 +1961,7 @@ Verified live after deploy: Up recalls `seq 1 300 | sed "s/^/final-/"`, Left /
 Right / Down insert nothing, a `less` pane scrolls one line per arrow (Enter
 1 -> 2, Down -> 3, Up -> 2), a wheel notch still moves 3 lines (0 -> 1 -> 4), and
 the keybar has 18 buttons with no console errors. Image `18.3.2-42`, deployed to
-`omp-web-rebuild-host.service` (200 locally; both the served and in-image
+`omp-web-host.service` (200 locally; both the served and in-image
 frontends are free of `scroll-toggle`); all eight pre-existing pane PIDs
 unchanged.
 
@@ -2012,7 +2012,7 @@ is inert and that Ctrl-C still reaches the pty (`^C` twice in the pane).
 
 Safari itself could not be exercised here - there is no Safari on this host - so
 the failure mode was reproduced against WebKit's documented per-task gesture
-rule, not in Safari. Image `18.3.2-44`, deployed to `omp-web-rebuild-host.service`.
+rule, not in Safari. Image `18.3.2-44`, deployed to `omp-web-host.service`.
 
 ### The copy notice refreshes on every terminal copy (`18.3.2-45`, frontend)
 
@@ -2033,7 +2033,7 @@ terminal or resize the tmux pane.
 Verified with the async API stubbed both ways: silent success -> the notice
 appears on the first and the second copy and clears itself after 4s; refusal ->
 it appears on both copies and is still present after 4.5s with the button
-visible. Image `18.3.2-45`, deployed to `omp-web-rebuild-host.service`.
+visible. Image `18.3.2-45`, deployed to `omp-web-host.service`.
 
 ### A scissors flash for a copy that lands (`18.3.2-46`, frontend)
 
@@ -2056,7 +2056,7 @@ keeps the notice with its button; that button flashes the pill and hides the bar
 Command-C does the same under a macOS user agent and stays inert under a Linux
 one; the dialog's Copy flashes it alongside "Copied 33 lines.". A screenshot of
 the pill was captured for the visual check. Image `18.3.2-46`, deployed to
-`omp-web-rebuild-host.service`.
+`omp-web-host.service`.
 
 ### Inline images render instead of a blank block (`18.3.2-47`)
 
@@ -2201,3 +2201,32 @@ inserted; the drag overlay appeared during the drag and cleared after the drop;
 a bell set `data-bell` with the amber outline and dot, and scrolled the flagged
 tab into view (`scrollLeft` 314 -> 471) when it was off-screen; tapping it cleared
 the flag. Image `18.3.2-52`.
+
+### Renamed to omp-web, branches consolidated (`18.3.2-52`)
+
+The rebuild is now simply `omp-web`: this directory, the deployment unit
+(`omp-web-host.service`, container `omp-web-host`), the image
+(`localhost/omp-web:18.3.2-52`, retagged from `localhost/omp-web-rebuild:...`) and
+the preview quadlet (`omp-web-preview`). The legacy ttyd + screen implementation
+moved to `~/.containers-arc/omp-web-screen` and lives on the branch
+`legacy-screen`, recorded exactly as it last ran - its worktree had nine
+uncommitted files that were never captured while it served traffic.
+
+`main` is now the rebuild (it was the orphan `rebuild/from-scratch`), so a clone
+gives the current implementation and the legacy history is one branch away. Both
+branches are on `origin`; earlier sections of this file name the image as
+`localhost/omp-web-rebuild:18.3.2-N` because that is what it was called then.
+
+Two things this turned up:
+
+- **The quadlet generator had been failing silently.**
+  `~/.config/containers/systemd/` is a directory of symlinks into each project;
+  nine pointed at deleted projects (`n8n`, `radicale`, `windmill-media`,
+  `x_scrape`), and one dangling symlink makes the generator abort *and emit
+  nothing* - so no quadlet unit was being generated at all, while running
+  containers kept going and `daemon-reload` reported success. The dangling links
+  are parked in `~/.config/containers/systemd.broken/`; generation now emits 93
+  units. Check it with
+  `rm -rf /tmp/genout && mkdir -p /tmp/genout && /usr/libexec/podman/quadlet -user /tmp/genout`.
+- Because of that, the container was started once by hand to restore service
+  while the generator was fixed, then replaced by the unit-managed one.
