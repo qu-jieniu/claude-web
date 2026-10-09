@@ -2,9 +2,12 @@
 
 Persistent omp terminals in a browser, rebuilt independently on the orphan branch
 `rebuild/from-scratch`. The host-connected deployment now serves
-`https://omp.jieniuu8.com/` through `127.0.0.1:17688`; the legacy worktree and
-`omp-web.service` remain unchanged. The separate 17685 preview uses an isolated
-home volume.
+`https://omp.jieniuu8.com/` through `127.0.0.1:17688`. The legacy implementation
+is archived at `~/.containers-arc/omp-web` (still serving its own
+`omp-web.service`, and still the git repository this worktree hangs off); it was
+moved there on 2026-10-08, which broke this worktree's `.git` pointer until
+`git -C ~/.containers-arc/omp-web worktree repair` was run. The separate 17685
+preview uses an isolated home volume.
 
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
