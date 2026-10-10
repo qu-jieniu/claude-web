@@ -98,8 +98,25 @@
   // to mangle glyphs (see skill docs).
   let canvasAddon = null;
 
+  /** ?renderer=dom | canvas picks one explicitly and remembers it (auto clears),
+   *  because which looks better on a given display is a judgement only the person
+   *  in front of it can make: DOM is sharper, canvas is steadier under output. */
+  function rendererPreference() {
+    const requested = new URLSearchParams(location.search).get('renderer');
+    if (requested === 'dom' || requested === 'canvas' || requested === 'auto') {
+      try {
+        if (requested === 'auto') localStorage.removeItem('terminal-renderer');
+        else localStorage.setItem('terminal-renderer', requested);
+      } catch {}
+      return requested === 'auto' ? null : requested;
+    }
+    try { return localStorage.getItem('terminal-renderer'); } catch { return null; }
+  }
+
   function applyRenderer() {
-    const wantCanvas = Number.isInteger(window.devicePixelRatio) && !!window.CanvasAddon;
+    const preference = rendererPreference();
+    const wantCanvas = (preference ? preference === 'canvas' : Number.isInteger(window.devicePixelRatio))
+      && !!window.CanvasAddon;
     if (wantCanvas && !canvasAddon) {
       try {
         canvasAddon = new CanvasAddon.CanvasAddon();

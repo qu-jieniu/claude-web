@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-53` and attaches to
+**Active persistent deployment:** production runs `18.3.2-54` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -45,11 +45,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web:18.3.2-53 .
+podman build -t localhost/omp-web:18.3.2-54 .
 podman run --rm -it --name omp-web-preview \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-home:/root \
-  localhost/omp-web:18.3.2-53
+  localhost/omp-web:18.3.2-54
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2206,7 +2206,7 @@ the flag. Image `18.3.2-52`.
 
 The rebuild is now simply `omp-web`: this directory, the deployment unit
 (`omp-web-host.service`, container `omp-web-host`), the image
-(`localhost/omp-web:18.3.2-53`, retagged from `localhost/omp-web-rebuild:...`) and
+(`localhost/omp-web:18.3.2-54`, retagged from `localhost/omp-web-rebuild:...`) and
 the preview quadlet (`omp-web-preview`). The legacy ttyd + screen implementation
 moved to `~/.containers-arc/omp-web-screen` and lives on the branch
 `legacy-screen`, recorded exactly as it last ran - its worktree had nine
@@ -2258,3 +2258,19 @@ Other levers, both live without a redeploy since the frontend is served from thi
 worktree: the A-/A+ keybar buttons for font size (stored per browser), and ttyd
 `-t` options for anything else (`fontFamily`, `fontWeight`, `letterSpacing`,
 `lineHeight`) - `omp-web-entry` builds the ttyd command line.
+
+### Renderer override for judging sharpness (`18.3.2-54`, frontend)
+
+`18.3.2-53` switched to the DOM renderer only when the device ratio is fractional,
+so on a display with a whole ratio it changes nothing - reported as "didn't notice
+anything different", which is the expected result if the ratio is 1 or 2 and means
+the softness has another cause (display scaling, font, size, or a taste for the
+DOM renderer's crisper glyphs).
+
+Rather than guess again, the choice is now overridable on the live site:
+`?renderer=dom`, `?renderer=canvas` or `?renderer=auto` (append with `&` when the
+URL already carries `?arg=...`). The choice is remembered in localStorage, so the
+page can be reloaded and compared without editing the URL again; `auto` returns
+to the ratio-based rule. DOM is sharper - real text at the device resolution -
+while canvas is steadier under rapid output, and which matters more is a
+judgement only the person in front of the display can make.
