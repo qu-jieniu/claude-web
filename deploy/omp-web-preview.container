@@ -4,7 +4,7 @@ After=default.target
 
 [Container]
 ContainerName=omp-web-preview
-Image=localhost/omp-web:18.3.2-55
+Image=localhost/omp-web:18.3.2-56
 PublishPort=127.0.0.1:17685:8080
 Volume=omp-web-home:/root
 

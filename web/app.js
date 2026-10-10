@@ -54,6 +54,9 @@
     try {
       localStorage.setItem('terminal-font-size', String(target));
     } catch {}
+    // Glyphs are cached per size: without dropping the cache, text can appear at
+    // the old size behind the new one.
+    term.clearTextureAtlas?.();
     scheduleFit();
   }
 
@@ -231,6 +234,17 @@
   let windowBarTimer = null;
   let windowBarFlagged = new Set();
 
+  /** Bring a tab into view by scrolling the bar, never the page: scrollIntoView
+   *  can move the visual viewport on iOS, which resizes the terminal - and a
+   *  resize mid-session is what leaves stale rows on screen. */
+  function revealTab(button) {
+    if (!button) return;
+    const bar = windowBar.getBoundingClientRect();
+    const tab = button.getBoundingClientRect();
+    if (tab.left < bar.left) windowBar.scrollLeft -= bar.left - tab.left;
+    else if (tab.right > bar.right) windowBar.scrollLeft += tab.right - bar.right;
+  }
+
   async function refreshWindowBar() {
     if (windowBarBusy || !currentArg) return;
     windowBarBusy = true;
@@ -261,14 +275,12 @@
         const mine = currentArg?.replace('tmux-', '@');
         const attached = data.windows.find(entry => entry.id === mine) ||
           data.windows.find(entry => entry.active);
-        windowBar.querySelector(`button[data-window="${attached?.id}"]`)
-          ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+        revealTab(windowBar.querySelector(`button[data-window="${attached?.id}"]`));
       } else if (newlyFlagged.length) {
         // A finished turn is only a notification if you can see it: a tab that
         // just got flagged scrolls itself into view, the way tmux's status line
         // showed it in place.
-        windowBar.querySelector(`button[data-window="${newlyFlagged[0]}"]`)
-          ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+        revealTab(windowBar.querySelector(`button[data-window="${newlyFlagged[0]}"]`));
       }
     } catch {
       // Keep the last known list: the bar is navigation, not authoritative state.
@@ -296,7 +308,7 @@
       other.setAttribute('aria-current', 'false');
     }
     button.setAttribute('aria-current', 'true');
-    button.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    revealTab(button);
     try {
       await fetch(`/windows/select?window=${encodeURIComponent(button.dataset.window)}`,
                   { method: 'POST', cache: 'no-store' });
@@ -464,7 +476,19 @@
       app.style.height = `${Math.max(1, Math.floor(height))}px`;
       app.style.top = `${viewport && zoom <= 1.01 ? viewport.offsetTop : 0}px`;
       app.style.setProperty('--composer-max-height', `${Math.max(100, Math.min(190, height * .34))}px`);
-      if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
+      if (host.clientWidth > 0 && host.clientHeight > 0) {
+        const cols = term.cols;
+        const rows = term.rows;
+        fit.fit();
+        if (term.cols !== cols || term.rows !== rows) {
+          // A resize re-wraps and repaints. The canvas renderer can otherwise
+          // keep rows from the previous geometry on screen - seen as the same
+          // text twice, at two different cell sizes - so drop its glyph cache
+          // and force a full repaint.
+          term.clearTextureAtlas?.();
+          term.refresh(0, term.rows - 1);
+        }
+      }
     });
   }
 

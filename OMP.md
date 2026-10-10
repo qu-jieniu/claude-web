@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-55` and attaches to
+**Active persistent deployment:** production runs `18.3.2-56` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -45,11 +45,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web:18.3.2-55 .
+podman build -t localhost/omp-web:18.3.2-56 .
 podman run --rm -it --name omp-web-preview \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-home:/root \
-  localhost/omp-web:18.3.2-55
+  localhost/omp-web:18.3.2-56
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2206,7 +2206,7 @@ the flag. Image `18.3.2-52`.
 
 The rebuild is now simply `omp-web`: this directory, the deployment unit
 (`omp-web-host.service`, container `omp-web-host`), the image
-(`localhost/omp-web:18.3.2-55`, retagged from `localhost/omp-web-rebuild:...`) and
+(`localhost/omp-web:18.3.2-56`, retagged from `localhost/omp-web-rebuild:...`) and
 the preview quadlet (`omp-web-preview`). The legacy ttyd + screen implementation
 moved to `~/.containers-arc/omp-web-screen` and lives on the branch
 `legacy-screen`, recorded exactly as it last ran - its worktree had nine
@@ -2296,3 +2296,29 @@ case - saw no change at all, which is exactly what was reported back.
 
 Decision, as pointer/ratio -> renderer: fine/1 dom, fine/2 dom, fine/1.5 dom,
 coarse/3 canvas; an explicit preference always wins.
+
+### Duplicated text after a resize (`18.3.2-56`, frontend)
+
+Reported with a phone screenshot: the same transcript visible twice at two cell
+sizes, the older copy faint and smaller behind the newer one, and whole blocks
+repeated. `tui.resizeScrollback` is `preserve` here ("repaint only the viewport,
+keep history wrapped at its old width"), so omp is *not* replaying the
+transcript - the older copy is the terminal's own renderer keeping rows from a
+previous geometry.
+
+Two changes, one of which is mine to own:
+
+- **`scrollIntoView` on a window-bar tab** (`18.3.2-52`) can move the *visual
+  viewport* on iOS, which resizes the terminal. That runs whenever a tab becomes
+  flagged, so it fired often. The bar now scrolls itself with `scrollLeft`
+  (`revealTab`), which cannot touch the page or the viewport.
+- **Glyph and row caches are now dropped when the geometry changes**: after a fit
+  that actually changes cols/rows, and after a font-size change, the app calls
+  `term.clearTextureAtlas()` and repaints the viewport. Cached glyphs are keyed by
+  size, so without this a resize or a zoom can leave text drawn at the old size.
+
+Not reproduced: the phone is the user's, the CDP Chrome used for UI checks is
+wedged and SSH to that workstation is denied, so this is a diagnosis from the
+screenshot plus the code paths, not a verified fix. The reasoning that makes it
+likely: the faint copy is *smaller* than the real text, which only happens when
+two cell sizes are on screen at once.
