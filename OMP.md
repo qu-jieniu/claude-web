@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-52` and attaches to
+**Active persistent deployment:** production runs `18.3.2-53` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -45,11 +45,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web:18.3.2-52 .
+podman build -t localhost/omp-web:18.3.2-53 .
 podman run --rm -it --name omp-web-preview \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-home:/root \
-  localhost/omp-web:18.3.2-52
+  localhost/omp-web:18.3.2-53
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -419,7 +419,7 @@ that the editable source `~/caddy/Caddyfile` and root-owned
 For future proxy changes, use:
 
 ```sh
-sudo ~/caddy/deploy.sh
+~/caddy/deploy.sh
 ```
 
 That command copies the source to `/etc/caddy/Caddyfile`, regenerates the
@@ -2206,7 +2206,7 @@ the flag. Image `18.3.2-52`.
 
 The rebuild is now simply `omp-web`: this directory, the deployment unit
 (`omp-web-host.service`, container `omp-web-host`), the image
-(`localhost/omp-web:18.3.2-52`, retagged from `localhost/omp-web-rebuild:...`) and
+(`localhost/omp-web:18.3.2-53`, retagged from `localhost/omp-web-rebuild:...`) and
 the preview quadlet (`omp-web-preview`). The legacy ttyd + screen implementation
 moved to `~/.containers-arc/omp-web-screen` and lives on the branch
 `legacy-screen`, recorded exactly as it last ran - its worktree had nine
@@ -2230,3 +2230,31 @@ Two things this turned up:
   `rm -rf /tmp/genout && mkdir -p /tmp/genout && /usr/libexec/podman/quadlet -user /tmp/genout`.
 - Because of that, the container was started once by hand to restore service
   while the generator was fixed, then replaced by the unit-managed one.
+
+### Sharp text on high-DPI and fractionally-scaled displays (`18.3.2-53`, frontend)
+
+xterm.js's canvas renderer rasterises glyphs at `devicePixelRatio` device pixels
+per CSS pixel. When that ratio is fractional - a 4K display at 125%/150% scaling,
+or any browser zoom level - each glyph lands on a fractional device pixel and the
+canvas smooths it, which reads as soft text. Text also stayed soft after dragging
+the window onto such a display, because a ratio change need not change the
+terminal's CSS size, so nothing re-measured: the old canvas kept rendering at the
+old scale until a reload.
+
+The frontend now picks the renderer from the ratio: **canvas when the ratio is a
+whole number** (crisp at 1:1 or 2:1 device pixels, and worth its speed there), and
+the **DOM renderer otherwise**, which lays out real text and lets the browser
+rasterise at the true device resolution. A `matchMedia('(resolution: Ndppx)')`
+listener re-applies the choice and refits when the ratio changes, so moving the
+window between displays no longer leaves text soft until reload.
+
+Verified the decision for the ratios that matter (1, 2, 3 -> canvas; 1.1, 1.25,
+1.5 -> DOM) and that `(resolution: 1.5dppx)` is a valid media query. **Not**
+verified in a browser: the CDP Chrome used for UI checks is wedged, so the runtime
+switch itself is unexercised - it is a pure function of `devicePixelRatio` plus a
+standard media-query listener.
+
+Other levers, both live without a redeploy since the frontend is served from this
+worktree: the A-/A+ keybar buttons for font size (stored per browser), and ttyd
+`-t` options for anything else (`fontFamily`, `fontWeight`, `letterSpacing`,
+`lineHeight`) - `omp-web-entry` builds the ttyd command line.

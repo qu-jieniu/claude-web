@@ -87,19 +87,55 @@
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(host);
-  // Canvas rendering avoids the DOM renderer's jitter under rapid output/scroll.
-  // WebGL would be faster still but is known to mangle glyphs (see skill docs);
-  // canvas is the safe middle ground. Falls back to the DOM renderer silently
-  // if the addon failed to load or a 2D context can't be created.
-  if (window.CanvasAddon) {
-    try {
-      term.loadAddon(new CanvasAddon.CanvasAddon());
-    } catch {}
+  // Rendering. The canvas addon avoids the DOM renderer's jitter under rapid
+  // output/scroll, but it rasterises glyphs at `devicePixelRatio` device pixels
+  // per CSS pixel - so whenever that ratio is fractional (a 4K display at 125%
+  // or 150% scaling, or any browser zoom level) each glyph lands on a
+  // fractional device pixel and the canvas smooths it, which reads as soft text.
+  // The DOM renderer lays out real text and lets the browser rasterise at the
+  // true device resolution, so it is sharper at any ratio; canvas is only worth
+  // its speed when the ratio is whole. WebGL would be faster still but is known
+  // to mangle glyphs (see skill docs).
+  let canvasAddon = null;
+
+  function applyRenderer() {
+    const wantCanvas = Number.isInteger(window.devicePixelRatio) && !!window.CanvasAddon;
+    if (wantCanvas && !canvasAddon) {
+      try {
+        canvasAddon = new CanvasAddon.CanvasAddon();
+        term.loadAddon(canvasAddon);
+      } catch {
+        canvasAddon = null;   // 2D context refused: the DOM renderer stays
+      }
+    } else if (!wantCanvas && canvasAddon) {
+      try { canvasAddon.dispose(); } catch {}
+      canvasAddon = null;
+    }
+    term.refresh(0, term.rows - 1);
   }
+
+  applyRenderer();
+
+  // Dragging the window to another screen or changing browser zoom changes the
+  // device pixel ratio without necessarily changing the terminal's CSS size, so
+  // nothing else would re-measure: the old canvas would keep rendering at the
+  // old scale and the text would stay soft until a reload.
+  let dprQuery = null;
+  function watchDevicePixelRatio() {
+    dprQuery?.removeEventListener('change', onDevicePixelRatioChange);
+    dprQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    dprQuery.addEventListener('change', onDevicePixelRatioChange, { once: true });
+  }
+  function onDevicePixelRatioChange() {
+    applyRenderer();
+    scheduleFit();
+    watchDevicePixelRatio();
+  }
+  watchDevicePixelRatio();
   // omp probes this terminal and, finding no graphics protocol, still emits
   // SIXEL for images - which a plain xterm.js drops, leaving the blank block it
-  // had reserved. Render them instead (SIXEL + iTerm2 IIP). Loaded after the
-  // canvas addon so the renderer exists first.
+  // had reserved. Render them instead (SIXEL + iTerm2 IIP); the addon manages
+  // its own layers, so it works with either renderer.
   if (window.ImageAddon) {
     try {
       term.loadAddon(new ImageAddon.ImageAddon({
