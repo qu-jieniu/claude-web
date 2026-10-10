@@ -98,9 +98,9 @@
   // to mangle glyphs (see skill docs).
   let canvasAddon = null;
 
-  /** ?renderer=dom | canvas picks one explicitly and remembers it (auto clears),
-   *  because which looks better on a given display is a judgement only the person
-   *  in front of it can make: DOM is sharper, canvas is steadier under output. */
+  /** ?renderer=dom | canvas picks one explicitly and remembers it; auto clears
+   *  the choice. Which looks better is a judgement only the person in front of
+   *  the display can make: DOM is sharper, canvas is steadier under output. */
   function rendererPreference() {
     const requested = new URLSearchParams(location.search).get('renderer');
     if (requested === 'dom' || requested === 'canvas' || requested === 'auto') {
@@ -115,7 +115,18 @@
 
   function applyRenderer() {
     const preference = rendererPreference();
-    const wantCanvas = (preference ? preference === 'canvas' : Number.isInteger(window.devicePixelRatio))
+    // Both complaints so far are real and pull opposite ways: the DOM renderer is
+    // sharper (real text, rasterised by the browser, per-glyph font fallback) -
+    // it was the default until 18.3.2-23 - while 18.3.2-23 moved to canvas
+    // because rapid output and scrolling were jittery, "especially on mobile".
+    // So the default follows the input device: a coarse pointer means a phone,
+    // where the jitter mattered; a fine pointer means a desk or a TV, where the
+    // sharpness does. A fractional device ratio rules canvas out either way,
+    // since that is exactly the softness being fixed. An explicit preference
+    // wins over all of it.
+    const coarse = window.matchMedia('(pointer: coarse)').matches;
+    const wholeRatio = Number.isInteger(window.devicePixelRatio);
+    const wantCanvas = (preference ? preference === 'canvas' : coarse && wholeRatio)
       && !!window.CanvasAddon;
     if (wantCanvas && !canvasAddon) {
       try {

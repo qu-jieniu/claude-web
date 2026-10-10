@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-54` and attaches to
+**Active persistent deployment:** production runs `18.3.2-55` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -45,11 +45,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web:18.3.2-54 .
+podman build -t localhost/omp-web:18.3.2-55 .
 podman run --rm -it --name omp-web-preview \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-home:/root \
-  localhost/omp-web:18.3.2-54
+  localhost/omp-web:18.3.2-55
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2206,7 +2206,7 @@ the flag. Image `18.3.2-52`.
 
 The rebuild is now simply `omp-web`: this directory, the deployment unit
 (`omp-web-host.service`, container `omp-web-host`), the image
-(`localhost/omp-web:18.3.2-54`, retagged from `localhost/omp-web-rebuild:...`) and
+(`localhost/omp-web:18.3.2-55`, retagged from `localhost/omp-web-rebuild:...`) and
 the preview quadlet (`omp-web-preview`). The legacy ttyd + screen implementation
 moved to `~/.containers-arc/omp-web-screen` and lives on the branch
 `legacy-screen`, recorded exactly as it last ran - its worktree had nine
@@ -2274,3 +2274,25 @@ page can be reloaded and compared without editing the URL again; `auto` returns
 to the ratio-based rule. DOM is sharper - real text at the device resolution -
 while canvas is steadier under rapid output, and which matters more is a
 judgement only the person in front of the display can make.
+
+### Renderer default follows the input device (`18.3.2-55`, frontend)
+
+Asked "didn't we make it dom by default before?" - correct: the DOM renderer was
+the default until `18.3.2-23`, which replaced it with canvas because rapid output
+and scrolling were jittery, "especially on mobile". Both observations are real and
+pull opposite ways. The DOM renderer lays out real text and lets the browser
+rasterise at the device resolution, with per-glyph font fallback - sharp. Canvas
+is far steadier under rapid output - smooth - but rasterises each glyph itself.
+
+So the default now follows the input device: a **coarse** pointer (a phone) keeps
+canvas, a **fine** pointer (a desk, a TV) gets the DOM renderer back. A fractional
+device ratio rules canvas out in either case, since that is the softness
+`18.3.2-53` aimed at. `?renderer=dom|canvas` still forces one and remembers it,
+and `?renderer=auto` clears the choice.
+
+This also removes the mistake in the `18.3.2-53` default: it only ever changed
+the renderer at a fractional ratio, so a display with a whole ratio - the common
+case - saw no change at all, which is exactly what was reported back.
+
+Decision, as pointer/ratio -> renderer: fine/1 dom, fine/2 dom, fine/1.5 dom,
+coarse/3 canvas; an explicit preference always wins.
