@@ -281,6 +281,23 @@ class HistoryEndpointTests(unittest.TestCase):
         self.assertEqual(page['start'], 0)
         self.assertEqual(len(page['lines']), page['total'])
 
+    def test_wrapped_rows_come_back_as_one_line(self):
+        """A long line wraps on screen; -J must join it again, or copying a URL
+        out of the dialog yields embedded newlines (reported for an OAuth URL)."""
+        subprocess.run(self.tmux + [
+            'send-keys', '-t', 'hist',
+            r"printf 'URLSTART'; printf 'a%.0s' $(seq 1 200); printf 'ENDURL\n'", 'Enter'],
+            capture_output=True)
+        time.sleep(0.6)
+        status, page = self.get('window=hist&count=40')
+        self.assertEqual(status, 200)
+        joined = [line for line in page['lines'] if 'URLSTART' in line]
+        self.assertTrue(joined, 'the long line must appear in the page')
+        self.assertTrue(any(line.endswith('ENDURL') for line in joined),
+                        'the whole line must arrive as a single entry')
+        self.assertFalse(any('URLSTART' in line and 'ENDURL' not in line for line in joined),
+                         'no partial fragments from the wrap')
+
     def test_offset_past_history_returns_an_empty_page(self):
         """Past the oldest line tmux clamps -S/-E and would return a stray line."""
         status, page = self.get('window=hist&count=10&offset=999999')

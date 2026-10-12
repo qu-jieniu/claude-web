@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-56` and attaches to
+**Active persistent deployment:** production runs `18.3.2-57` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -45,11 +45,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web:18.3.2-56 .
+podman build -t localhost/omp-web:18.3.2-57 .
 podman run --rm -it --name omp-web-preview \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-home:/root \
-  localhost/omp-web:18.3.2-56
+  localhost/omp-web:18.3.2-57
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2206,7 +2206,7 @@ the flag. Image `18.3.2-52`.
 
 The rebuild is now simply `omp-web`: this directory, the deployment unit
 (`omp-web-host.service`, container `omp-web-host`), the image
-(`localhost/omp-web:18.3.2-56`, retagged from `localhost/omp-web-rebuild:...`) and
+(`localhost/omp-web:18.3.2-57`, retagged from `localhost/omp-web-rebuild:...`) and
 the preview quadlet (`omp-web-preview`). The legacy ttyd + screen implementation
 moved to `~/.containers-arc/omp-web-screen` and lives on the branch
 `legacy-screen`, recorded exactly as it last ran - its worktree had nine
@@ -2322,3 +2322,26 @@ wedged and SSH to that workstation is denied, so this is a diagnosis from the
 screenshot plus the code paths, not a verified fix. The reasoning that makes it
 likely: the faint copy is *smaller* than the real text, which only happens when
 two cell sizes are on screen at once.
+
+### Wrapped rows come back joined, so URLs can be copied (`18.3.2-57`, service)
+
+Reported while logging in to Anthropic through the web terminal: the
+authorization URL was split across several terminal rows, so selecting it
+produced embedded newlines and a broken URL. The terminal is right to wrap - a row
+is at most the pane width - but the *history* endpoint handed those rows back as
+separate lines, so even the Select dialog (which uses `white-space: pre` and
+scrolls sideways rather than wrapping) had the URL in pieces.
+
+`capture-pane` now runs with `-J` in both `/history` and `/history/search`, which
+joins rows the terminal wrapped. Verified against a live pane: a 300-character
+URL arriving as four rows without `-J` comes back as one line with it. The page
+size still counts screen rows, so a page can contain fewer joined lines than
+`count` - asserted by a new regression test (a long line appears once, whole,
+with no fragments).
+
+The other half of that report is not an app problem: the OAuth callback goes to
+`http://localhost:PORT/...` on the machine running omp, so a browser on any other
+device - a phone included - cannot complete it. omp offers its paste-the-code
+fallback only for providers whose redirect is not loopback, so for Anthropic the
+flow must finish where that loopback is local, or an SSH port-forward has to
+bring it there.

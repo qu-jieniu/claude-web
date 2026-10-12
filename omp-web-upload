@@ -164,7 +164,9 @@ class UploadHandler(BaseHTTPRequestHandler):
                 'total': total, 'start': 0, 'more': False, 'lines': [],
             })
             return
-        args = ['capture-pane', '-p', '-t', window,
+        # -J joins rows that the terminal wrapped: without it a long URL arrives
+        # as several lines and copying it out yields embedded newlines.
+        args = ['capture-pane', '-p', '-J', '-t', window,
                 '-S', str(start - history_size), '-E', str(end - 1 - history_size)]
         if colour:
             args.append('-e')
@@ -214,7 +216,7 @@ class UploadHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'window not found'})
             return
 
-        text = self.tmux('capture-pane', '-p', '-t', window, '-S', '-')
+        text = self.tmux('capture-pane', '-p', '-J', '-t', window, '-S', '-')
         if text is None:
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'ok': False, 'error': 'capture failed'})
             return
