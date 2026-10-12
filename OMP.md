@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-57` and attaches to
+**Active persistent deployment:** production runs `18.3.2-58` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -45,11 +45,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web:18.3.2-57 .
+podman build -t localhost/omp-web:18.3.2-58 .
 podman run --rm -it --name omp-web-preview \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-home:/root \
-  localhost/omp-web:18.3.2-57
+  localhost/omp-web:18.3.2-58
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -2206,7 +2206,7 @@ the flag. Image `18.3.2-52`.
 
 The rebuild is now simply `omp-web`: this directory, the deployment unit
 (`omp-web-host.service`, container `omp-web-host`), the image
-(`localhost/omp-web:18.3.2-57`, retagged from `localhost/omp-web-rebuild:...`) and
+(`localhost/omp-web:18.3.2-58`, retagged from `localhost/omp-web-rebuild:...`) and
 the preview quadlet (`omp-web-preview`). The legacy ttyd + screen implementation
 moved to `~/.containers-arc/omp-web-screen` and lives on the branch
 `legacy-screen`, recorded exactly as it last ran - its worktree had nine
@@ -2345,3 +2345,11 @@ device - a phone included - cannot complete it. omp offers its paste-the-code
 fallback only for providers whose redirect is not loopback, so for Anthropic the
 flow must finish where that loopback is local, or an SSH port-forward has to
 bring it there.
+
+### Tapping a line in the history dialog selects it (`18.3.2-58`, frontend)
+
+`18.3.2-57` joined wrapped rows, so a URL now arrives in the dialog as one line -
+but that line is longer than the dialog, which scrolls sideways instead of
+wrapping, and dragging a selection along it is impractical with a thumb. Tapping
+a line now selects the whole line, so the sequence for a long URL is: Select, tap
+the line, press Copy. A drag-selection still wins if one already exists.

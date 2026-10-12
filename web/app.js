@@ -1424,6 +1424,22 @@
     selection.addRange(range);
     selectionText.focus({ preventScroll: true });
   });
+  // Tapping a line selects the whole line. Dragging a selection across a row
+  // that is longer than the dialog (which scrolls sideways instead of wrapping)
+  // is impractical, especially with a thumb - and the line most likely to be
+  // copied that way is a URL.
+  selectionText.addEventListener('click', event => {
+    const line = event.target?.closest?.('.line');
+    if (!line) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) return;   // a real drag-selection wins
+    const range = document.createRange();
+    range.selectNodeContents(line);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    selectionStatus.textContent = 'Line selected — press Copy.';
+  });
+
   document.getElementById('copy-selection').addEventListener('pointerdown', event => event.preventDefault());
   document.getElementById('copy-selection').addEventListener('click', async () => {
     const selection = window.getSelection();
