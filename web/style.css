@@ -325,6 +325,18 @@ dialog {
 }
 
 dialog::backdrop { background: #000a; }
+
+/* The history dialog sizes to the screen it is on. */
+#selection-dialog {
+  width: min(1200px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+}
+
+/* A flex column, and only while open: a closed <dialog> must stay display:none. */
+#selection-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
 dialog h1 { margin: 0; font-size: 20px; }
 dialog p { font-size: 14px; line-height: 1.5; }
 dialog label { display: block; margin-bottom: 6px; }
@@ -348,7 +360,11 @@ dialog textarea {
    applied as inline spans, and `white-space: pre` so long lines overflow
    sideways instead of wrapping and breaking the line-per-row mapping. */
 #selection-text {
-  height: 45dvh;
+  /* Fills the dialog instead of a fixed 45dvh: that wasted space on a large
+     display and left little room once the keyboard took its share on a phone. */
+  flex: 1 1 auto;
+  min-height: 0;   /* shrink rather than overflow, so it scrolls internally */
+  height: auto;
   margin: 0;
   padding: 8px;
   overflow: auto;
