@@ -55,6 +55,60 @@ HISTORY_OSC8_TEXT_RE = re.compile(r'\]8;[^;]*;([^\]\x1b]*)')
 SGR_ONLY_RE = re.compile(r'\x1b\[[0-9;?]*m')
 
 
+# Box-drawing characters a full-screen UI draws its frame with. Every row of such
+# a frame is full width, so a width test alone joins a whole *screen* into one
+# line - and its rows are separate layout lines, not one wrapped line - so they
+# are excluded from stitching. Their contents are still scanned for URLs.
+FRAME_CHARS = set('│┌┐└┘├┤┬┴┼─━┃┏┓┗┛┣┫┳┻╋╭╮╰╯▏▕║═╠╣╦╩╬')
+URL_RE = re.compile(r"https?://[^\s'\"<>\[\]{}]+")
+
+
+def plain(line: str) -> str:
+    """The row's text without colour escapes."""
+    return SGR_ONLY_RE.sub('', line)
+
+
+def is_frame_row(line: str) -> bool:
+    """True for a row a full-screen UI drew, which is never a wrapped line."""
+    stripped = plain(line).strip()
+    return bool(stripped) and (stripped[0] in FRAME_CHARS or stripped[-1] in FRAME_CHARS)
+
+
+def strip_frame(line: str) -> str:
+    """The text inside a frame row, without its border characters."""
+    text = plain(line)
+    start, end = 0, len(text)
+    while start < end and (text[start] in FRAME_CHARS or text[start] == ' '):
+        start += 1
+    while end > start and (text[end - 1] in FRAME_CHARS or text[end - 1] == ' '):
+        end -= 1
+    return text[start:end]
+
+
+def extract_urls(lines, width):
+    """URLs in the history, reassembled across whatever broke them.
+
+    A URL split over rows of a TUI frame is not a wrapped *line* - the frame's
+    border characters break it - so each row is reduced to its content and rows
+    that filled their width are concatenated, which puts the URL back together.
+    """
+    chunks, previous_full = [], False
+    for line in lines:
+        text = strip_frame(line)
+        if chunks and previous_full and text:
+            chunks[-1] += text
+        else:
+            chunks.append(text)
+        previous_full = len(text) >= width - 6
+    found, urls = set(), []
+    for match in URL_RE.finditer('\n'.join(chunks)):
+        url = match.group(0).rstrip('.,;:')
+        if url not in found:
+            found.add(url)
+            urls.append(url)
+    return urls
+
+
 def join_wrapped_lines(lines, width):
     """Stitch rows that an application laid out itself back into logical lines.
 
@@ -70,7 +124,9 @@ def join_wrapped_lines(lines, width):
     out = []
     previous_full = False
     for line in lines:
-        if out and previous_full and line and not line[0].isspace():
+        # A frame row is a layout line, never a continuation.
+        if (out and previous_full and line and not line[0].isspace()
+                and not is_frame_row(line) and not is_frame_row(out[-1])):
             out[-1] += line[2:] if line.startswith('> ') else line
         else:
             out.append(line)
@@ -261,6 +317,10 @@ class UploadHandler(BaseHTTPRequestHandler):
             'ok': True, 'window': window, 'offset': offset, 'count': count,
             'total': total, 'start': start, 'more': start > 0,
             'width': pane_width, 'lines': lines,
+            # URLs to offer as copyable one-liners: a URL inside a full-screen UI
+            # is broken by the frame's borders, which no amount of row stitching
+            # can undo.
+            'links': extract_urls(lines, pane_width),
         })
 
     def handle_history_search(self):

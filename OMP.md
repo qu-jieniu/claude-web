@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-63` and attaches to
+**Active persistent deployment:** production runs `18.3.2-64` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -2430,3 +2430,26 @@ continuation prompt, indented rows, colour escapes not counting toward the width
 no width meaning no joining) and six covering the escape stripping as direct unit
 tests, since the tmux path cannot reproduce what a redrawing TUI leaves behind:
 the shell echoes the payload next to the output.
+
+### TUI frames are not stitched; URLs are extracted instead (`18.3.2-64`)
+
+`18.3.2-63` did more harm than good: every row of a full-screen UI is full width,
+so the stitcher joined whole *frames* and the history came back with lines over
+2600 characters. Frame rows are now excluded - a row whose first or last non-space
+character is a box-drawing character is a layout row, never a continuation - which
+restores the rows while keeping the stitching that does work, on ordinary shell
+output.
+
+That leaves the original problem: a URL inside a TUI is broken by the frame's
+border characters, so no amount of row stitching reassembles it. `/history` now
+reports `links`: rows are reduced to their contents (frames stripped), rows that
+filled their width are concatenated, and URLs are matched in the result and
+deduplicated. The dialog lists them above the history, each with a **Copy** button
+(synchronous first, so iOS accepts the gesture) and a link that opens it - the
+Claude-mobile shape asked for, since a TUI row can never be one copyable string.
+
+Verified against the history that failed - the 81-column window whose lines had
+merged to 2673 characters: it now returns 396 sane lines with a single long one,
+plus 13 links including the Anthropic authorization URL. 53 tests pass: five cover
+extraction (a URL split across frame rows reassembled, plain output, no URLs,
+duplicates collapsing) and one asserts frame rows are never stitched.

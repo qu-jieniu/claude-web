@@ -19,6 +19,7 @@ upload_globals = runpy.run_path(str(ROOT / 'omp-web-upload'))
 sanitize_filename = upload_globals['sanitize_filename']
 join_wrapped_lines = upload_globals['join_wrapped_lines']
 strip_history_escapes = upload_globals['strip_history_escapes']
+extract_urls = upload_globals['extract_urls']
 
 
 class FilenameSanitizationTests(unittest.TestCase):
@@ -63,6 +64,37 @@ class StripHistoryEscapesTests(unittest.TestCase):
 
     def test_unrelated_text_is_untouched(self):
         self.assertEqual(strip_history_escapes('seq 1 200'), 'seq 1 200')
+
+
+class UrlExtractionTests(unittest.TestCase):
+    """A URL inside a full-screen UI is broken by the frame's border characters,
+    which row stitching cannot undo; it is extracted instead."""
+
+    WIDTH = 81
+
+    def frame(self, text):
+        inner = text + ' ' * (self.WIDTH - 4 - len(text))
+        return '│ ' + inner + ' │'
+
+    def test_url_split_across_frame_rows_is_reassembled(self):
+        url = 'https://claude.ai/oauth/authorize?client_id=abc&code=true'
+        rows = [self.frame(url[:60]), self.frame(url[60:]), self.frame('unrelated')]
+        self.assertEqual(extract_urls(rows, self.WIDTH), [url])
+
+    def test_url_in_plain_output(self):
+        url = 'https://example.test/login?token=abc'
+        self.assertEqual(extract_urls([f'Open this URL: {url}'], self.WIDTH), [url])
+
+    def test_no_urls_means_no_links(self):
+        self.assertEqual(extract_urls(['plain text', 'more text'], self.WIDTH), [])
+
+    def test_duplicates_collapse(self):
+        url = 'https://example.test/x'
+        self.assertEqual(extract_urls([url, url], self.WIDTH), [url])
+
+    def test_frame_rows_are_never_stitched(self):
+        rows = [self.frame('x' * 40), self.frame('y' * 40)]
+        self.assertEqual(join_wrapped_lines(rows, self.WIDTH), rows)
 
 
 class JoinWrappedLinesTests(unittest.TestCase):

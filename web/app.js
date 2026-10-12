@@ -1073,6 +1073,7 @@
 
   const selectionDialog = document.getElementById('selection-dialog');
   const historyJoin = document.getElementById('history-join');
+  const historyLinks = document.getElementById('history-links');
   const selectionText = document.getElementById('selection-text');
   const selectionStatus = document.getElementById('selection-status');
   const historyQuery = document.getElementById('history-query');
@@ -1308,6 +1309,7 @@
     const page = await fetchHistory(offset);
     if (!page) { selectionStatus.textContent = 'Could not load that match.'; return; }
     historyRaw = page.lines;
+    renderHistoryLinks(page.links);
     historyBaseIndex = page.start;
     selectionOffset = offset + page.lines.length;
     selectionMore = !!page.more;
@@ -1322,6 +1324,7 @@
     if (!page) {
       // No window (launcher menu) or the service is unreachable.
       historyRaw = localSnapshotLines();
+      renderHistoryLinks(null);
       renderHistory();
       selectionText.scrollTop = selectionText.scrollHeight;
       return;
@@ -1333,6 +1336,34 @@
     renderHistory();
     selectionText.scrollTop = selectionText.scrollHeight;
     if (!selectionMore) selectionStatus.textContent = 'Start of history.';
+  }
+
+  /** Links found in the history, each copyable as one string. */
+  function renderHistoryLinks(links) {
+    historyLinks.replaceChildren(...(links || []).map(url => {
+      const row = document.createElement('div');
+      row.className = 'link-row';
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = url;
+      row.append(link);
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.textContent = 'Copy';
+      copy.setAttribute('aria-label', `Copy ${url}`);
+      copy.addEventListener('click', async () => {
+        // Synchronous first: this click's gesture is what the browser requires.
+        const ok = copyInGesture(url) || await writeClipboard(url);
+        if (ok) flashCopied();
+        copy.textContent = ok ? 'Copied' : 'Refused';
+        setTimeout(() => { copy.textContent = 'Copy'; }, 1800);
+      });
+      row.append(copy);
+      return row;
+    }));
+    historyLinks.hidden = !(links && links.length);
   }
 
   function renderJoinToggle() {

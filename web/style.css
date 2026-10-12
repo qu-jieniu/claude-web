@@ -382,6 +382,22 @@ dialog textarea {
 #selection-text .match { background: #6b5320; color: #f5ecd8; } /* 6.2:1; the inherited
    foreground was 3.8:1, and an ANSI colour inside a match could be worse */
 #selection-text .match.current { background: #b8860b; color: #161a21; }
+/* URLs found in the history, each a copyable one-liner: a URL inside a
+   full-screen UI is broken by the frame's borders, so the row view cannot offer
+   it as one string. */
+#history-links { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+#history-links .link-row { display: flex; align-items: center; gap: 6px; }
+#history-links a {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #8fcbff;
+  font-size: 13px;
+}
+#history-links button { flex: none; min-height: 34px; padding: 0 12px; }
+
 .history-search { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
 #history-join[aria-pressed="false"] { opacity: 0.55; }
 
