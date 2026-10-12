@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-59` and attaches to
+**Active persistent deployment:** production runs `18.3.2-60` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -2362,5 +2362,7 @@ share on a phone. It now fills the space it is given - `min(1200px, 100% - 24px)
 wide on a desktop, and the history area is a flex child (`flex: 1 1 auto`,
 `min-height: 0`) that takes whatever is left and scrolls internally, up to the
 dialog's `max-height`. A closed `<dialog>` must stay `display: none`, so the flex
-column applies to `[open]` only. The existing mobile media query still caps the
-width at `min(720px, 100% - 16px)` with tighter padding.
+column applies to `[open]` only. A second, unconditional
+`#selection-dialog { width: min(720px, ...) }` rule further down the file was
+overriding both this and the original `500px` base, pinning the dialog at 720px
+on every screen; it is folded into the one rule (its 12px padding kept).

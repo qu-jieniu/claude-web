@@ -328,8 +328,9 @@ dialog::backdrop { background: #000a; }
 
 /* The history dialog sizes to the screen it is on. */
 #selection-dialog {
-  width: min(1200px, calc(100% - 24px));
+  width: min(1200px, calc(100% - 16px));
   max-height: calc(100% - 24px);
+  padding: 12px;
 }
 
 /* A flex column, and only while open: a closed <dialog> must stay display:none. */
@@ -355,7 +356,6 @@ dialog textarea {
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .dialog-actions button { min-height: 44px; }
 
-#selection-dialog { width: min(720px, calc(100% - 16px)); padding: 12px; }
 /* History view: real DOM text (so it is selectable and searchable), colour
    applied as inline spans, and `white-space: pre` so long lines overflow
    sideways instead of wrapping and breaking the line-per-row mapping. */
