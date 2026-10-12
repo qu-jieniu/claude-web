@@ -92,6 +92,20 @@ class UrlExtractionTests(unittest.TestCase):
         url = 'https://example.test/x'
         self.assertEqual(extract_urls([url, url], self.WIDTH), [url])
 
+    def test_split_url_does_not_swallow_the_next_rows_text(self):
+        """A real login prints the URL on a full row and the phrase 'Local
+        shortcut' begins the next row; the extractor must not glue them."""
+        width = 81
+        url = 'https://claude.ai/oauth/authorize?client_id=abc&code=true'
+        rows = [url, 'Local shortcut (this machine only): http://localhost:54545/launch']
+        self.assertEqual(extract_urls(rows, width), [url])
+
+    def test_loopback_shortcuts_are_not_reported_as_links(self):
+        """omp's local launch URL only resolves on the host running omp; offering
+        it as a copyable link from a phone is a trap."""
+        self.assertEqual(extract_urls(['http://localhost:54545/launch'], 81), [])
+        self.assertEqual(extract_urls(['http://127.0.0.1:4000/x'], 81), [])
+
     def test_frame_rows_are_never_stitched(self):
         rows = [self.frame('x' * 40), self.frame('y' * 40)]
         self.assertEqual(join_wrapped_lines(rows, self.WIDTH), rows)

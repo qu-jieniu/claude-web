@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-64` and attaches to
+**Active persistent deployment:** production runs `18.3.2-65` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -2453,3 +2453,23 @@ merged to 2673 characters: it now returns 396 sane lines with a single long one,
 plus 13 links including the Anthropic authorization URL. 53 tests pass: five cover
 extraction (a URL split across frame rows reassembled, plain output, no URLs,
 duplicates collapsing) and one asserts frame rows are never stitched.
+
+### Two extractor bugs against a real login (`18.3.2-65`, service)
+
+Running a real `omp login anthropic` against the deployed service - which the
+heuristics so far had never been tested against - showed two bugs, one of them
+potentially nasty.
+
+- **The URL swallowed the next row's first word**: the extractor joins rows that
+  filled their width, and omp's URL row is one, so 'Local' after the newline got
+  glued to the URL ('...&state=...&code=trueLocal'). A match is now cut at the
+  newline: rows that genuinely continue one line were concatenated *without* a
+  newline by the chunking, so a newline inside a match means the tail belongs to a
+  different line.
+- **`http://localhost:54545/launch` - omp's own launch shortcut - was reported as
+  a link.** It only resolves on the host running omp, so offering it to copy from
+  a phone is a trap; loopback and 127.0.0.1 URLs are filtered out.
+
+Verified with a real login run: the authorization URL comes back as one clean
+416-character link, no 'Local' suffix, no launch shortcut. 55 tests pass, two new
+ones covering both.

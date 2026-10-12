@@ -102,7 +102,15 @@ def extract_urls(lines, width):
         previous_full = len(text) >= width - 6
     found, urls = set(), []
     for match in URL_RE.finditer('\n'.join(chunks)):
-        url = match.group(0).rstrip('.,;:')
+        # A match that crosses a newline ended at it: rows that genuinely continue
+        # one line were concatenated without a newline by the chunking above, so a
+        # newline here means the next row's text is a different line's - and
+        # letting the pattern run on produced '...&code=trueLocal' nonsense.
+        url = match.group(0).split('\n', 1)[0].rstrip('.,;:')
+        # omp's own launch shortcut is loopback-only and cannot work from another
+        # device, so reporting it as a link would be a trap.
+        if 'localhost' in url or '127.0.0.1' in url:
+            continue
         if url not in found:
             found.add(url)
             urls.append(url)
