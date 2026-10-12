@@ -36,6 +36,29 @@ WINDOW_LIST_FORMAT = '\t'.join([
 ])
 WINDOW_RE = re.compile(r'^[A-Za-z0-9_@:.+-]{1,64}$')
 
+# Escape sequences history should not carry as text. SGR is kept (the frontend
+# renders it as colour), but OSC 8 hyperlinks are rewritten to their target URL -
+# an agent CLI wraps an authorization URL in one, and capture-pane hands the raw
+# sequence back, so the dialog showed `]8;id=...;https://...` before the URL and
+# copying it produced that noise instead of a usable link.
+HISTORY_OSC8_RE = re.compile(r'\x1b\]8;[^;]*;([^\x07\x1b\n]*)(?:\x07|\x1b\\)?(?:\1)?')
+HISTORY_OSC_RE = re.compile(r'\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?')
+HISTORY_DCS_RE = re.compile(r'\x1bP[^\x1b\n]*(?:\x1b\\)?')
+HISTORY_CSI_RE = re.compile(r'\x1b\[[0-9;?]*([A-Za-z])')
+
+
+def strip_history_escapes(text: str) -> str:
+    """Return history text with escapes reduced to something copyable."""
+    # A hyperlink whose visible text repeats its target would otherwise come out
+    # doubled - the CLI prints the URL as both - so the duplicate is swallowed.
+    text = HISTORY_OSC8_RE.sub(lambda match: match.group(1), text)
+    text = HISTORY_OSC_RE.sub('', text)
+    text = HISTORY_DCS_RE.sub('', text)
+    text = HISTORY_CSI_RE.sub(lambda match: match.group(0) if match.group(1) == 'm' else '', text)
+    # anything left that opens an escape but is not a kept SGR (charset selects,
+    # stray ESC bytes)
+    return re.sub(r'\x1b(?!\[[0-9;?]*m)', '', text)
+
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to prevent path traversal and shell injection."""
@@ -171,6 +194,8 @@ class UploadHandler(BaseHTTPRequestHandler):
         if colour:
             args.append('-e')
         text = self.tmux(*args)
+        if text is not None:
+            text = strip_history_escapes(text)
         if text is None:
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'ok': False, 'error': 'capture failed'})
             return
@@ -217,6 +242,8 @@ class UploadHandler(BaseHTTPRequestHandler):
             return
 
         text = self.tmux('capture-pane', '-p', '-J', '-t', window, '-S', '-')
+        if text is not None:
+            text = strip_history_escapes(text)
         if text is None:
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'ok': False, 'error': 'capture failed'})
             return

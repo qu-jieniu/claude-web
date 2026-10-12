@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-60` and attaches to
+**Active persistent deployment:** production runs `18.3.2-61` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -2366,3 +2366,26 @@ column applies to `[open]` only. A second, unconditional
 `#selection-dialog { width: min(720px, ...) }` rule further down the file was
 overriding both this and the original `500px` base, pinning the dialog at 720px
 on every screen; it is folded into the one rule (its 12px padding kept).
+
+### History drops escapes that are not colour (`18.3.2-61`, service)
+
+Reported with a screenshot of a login: the dialog's URL lines began
+`]8;id=b80e06dc;https://claude.ai/oauth/authorize?…`. That is an **OSC 8
+hyperlink** - the CLI wraps the URL in one - and `capture-pane` hands the sequence
+back as text, so the dialog showed it and copying produced that noise instead of a
+usable URL. Nothing had ever removed escapes: the frontend renders SGR and prints
+the rest verbatim.
+
+`/history` and `/history/search` now pass every capture through
+`strip_history_escapes`: SGR is kept (it is the colour the dialog renders), an OSC
+8 hyperlink becomes its target URL - with a visible text that merely repeats the
+target swallowed, so the URL is not doubled - and other OSC/DCS/CSI sequences are
+dropped. Every pattern is anchored to a single line; a first version let
+`[^ESC]*` run across newlines and merged history lines, which the paging tests
+caught.
+
+Verified: 36 unit tests pass (including one that writes a real OSC 8 hyperlink
+into a pane and asserts the target survives as a clean line, exactly once), and
+the strip leaves line counts unchanged. This also explains the earlier "nothing
+changed" report: `18.3.2-57` joined the wrapped rows, but the escape noise was
+the actual reason the URL could not be used.

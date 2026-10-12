@@ -281,6 +281,34 @@ class HistoryEndpointTests(unittest.TestCase):
         self.assertEqual(page['start'], 0)
         self.assertEqual(len(page['lines']), page['total'])
 
+    def test_pages_backwards_without_gaps_or_overlap(self):
+        status, newest = self.get('window=hist&count=40')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(newest['lines']), 40)
+        self.assertTrue(newest['more'])
+        self.assertEqual(newest['offset'], 0)
+
+        status, older = self.get('window=hist&count=40&offset=40')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(older['lines']), 40)
+        # adjacent pages must be contiguous: the older page's last line is the
+        # line immediately before the newest page's first line
+        self.assertNotEqual(newest['lines'][0], older['lines'][-1])
+        full = subprocess.run(self.tmux + ['capture-pane', '-p', '-t', 'hist', '-S', '-'],
+                              capture_output=True, text=True).stdout.split('\n')
+        newest_first = newest['lines'][0]
+        older_last = older['lines'][-1]
+        i_newest = full.index(newest_first)
+        i_older = full.index(older_last)
+        self.assertEqual(i_newest - i_older, 1, 'pages must be adjacent')
+
+    def test_oldest_page_reports_no_more(self):
+        status, page = self.get('window=hist&count=5000')
+        self.assertEqual(status, 200)
+        self.assertFalse(page['more'], 'a full capture should exhaust history')
+        self.assertEqual(page['start'], 0)
+        self.assertEqual(len(page['lines']), page['total'])
+
     def test_wrapped_rows_come_back_as_one_line(self):
         """A long line wraps on screen; -J must join it again, or copying a URL
         out of the dialog yields embedded newlines (reported for an OAuth URL)."""
@@ -297,6 +325,52 @@ class HistoryEndpointTests(unittest.TestCase):
                         'the whole line must arrive as a single entry')
         self.assertFalse(any('URLSTART' in line and 'ENDURL' not in line for line in joined),
                          'no partial fragments from the wrap')
+
+    def long_line_session(self, name):
+        """A session of its own: long lines wrap, and -J joins them, which would
+        otherwise shift the line counts the other tests depend on."""
+        subprocess.run(self.tmux + ['new-session', '-d', '-s', name, '-x', '60', '-y', '12',
+                                    'bash --norc -i'], capture_output=True)
+        time.sleep(0.4)
+        return name
+
+    def test_wrapped_rows_come_back_as_one_line(self):
+        """A long line wraps on screen; -J must join it again, or copying a URL
+        out of the dialog yields embedded newlines."""
+        name = self.long_line_session('wraptest')
+        subprocess.run(self.tmux + [
+            'send-keys', '-t', name,
+            r"printf 'URLSTART'; printf 'a%.0s' $(seq 1 200); printf 'ENDURL\n'", 'Enter'],
+            capture_output=True)
+        time.sleep(0.8)
+        status, page = self.get(f'window={name}&count=20')
+        self.assertEqual(status, 200)
+        hits = [line for line in page['lines'] if 'URLSTART' in line]
+        self.assertTrue(hits, 'the long line must appear')
+        self.assertTrue(any(line.endswith('ENDURL') for line in hits),
+                        'it must arrive as one entry, not fragments')
+        subprocess.run(self.tmux + ['kill-session', '-t', name], capture_output=True)
+
+    def test_osc8_hyperlink_becomes_its_url(self):
+        """An agent CLI wraps a URL in an OSC 8 hyperlink; capture-pane hands the
+        sequence back, and it used to show as `]8;id=...;https://...` noise in
+        front of the URL, so copying the login link produced garbage."""
+        name = self.long_line_session('osctest')
+        url = 'https://example.test/oauth?code=1'
+        subprocess.run(self.tmux + [
+            'send-keys', '-t', name,
+            r"printf '\033]8;id=abc;" + url + r"\033\\" + url + r"\033]8;;\033\\\n'", 'Enter'],
+            capture_output=True)
+        time.sleep(0.8)
+        status, page = self.get(f'window={name}&count=20')
+        self.assertEqual(status, 200)
+        # The shell's echo of the command legitimately contains the text ]8;id=...,
+        # so the checks are: no escape bytes anywhere, and the link target present
+        # as a clean line of its own (once - the visible text repeats it).
+        self.assertFalse(any('\x1b' in line for line in page['lines']), 'no escape bytes')
+        self.assertEqual(page['lines'].count(url), 1,
+                         'the link target must survive as a clean line, exactly once')
+        subprocess.run(self.tmux + ['kill-session', '-t', name], capture_output=True)
 
     def test_offset_past_history_returns_an_empty_page(self):
         """Past the oldest line tmux clamps -S/-E and would return a stray line."""
