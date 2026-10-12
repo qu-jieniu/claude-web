@@ -1072,6 +1072,7 @@
   });
 
   const selectionDialog = document.getElementById('selection-dialog');
+  const historyJoin = document.getElementById('history-join');
   const selectionText = document.getElementById('selection-text');
   const selectionStatus = document.getElementById('selection-status');
   const historyQuery = document.getElementById('history-query');
@@ -1228,11 +1229,20 @@
     return parts.join('').split('\n');
   }
 
+  // Rows an application laid out itself (a long URL in a transcript) are stitched
+  // back into one line by the service; this turns that off to compare.
+  const JOIN_PREF = 'terminal-join-lines';
+
+  function joinLines() {
+    try { return localStorage.getItem(JOIN_PREF) !== '0'; } catch { return true; }
+  }
+
   async function fetchHistory(offset) {
     const window = historyWindowArg();
     if (!window) return null;
     try {
-      const res = await fetch(`/history?window=${encodeURIComponent(window)}&count=${HISTORY_CHUNK}&offset=${offset}&color=1`,
+      const res = await fetch(`/history?window=${encodeURIComponent(window)}&count=${HISTORY_CHUNK}`
+        + `&offset=${offset}&color=1&join=${joinLines() ? 1 : 0}`,
         { cache: 'no-store' });
       if (!res.ok) return null;
       const data = await res.json();
@@ -1307,15 +1317,7 @@
     setCurrentMatch(line ? line.querySelector('.match') : null);
   }
 
-  async function openSelection() {
-    selectionStatus.textContent = '';
-    historyCount.textContent = '';
-    searchMatches = [];
-    searchIndex = 0;
-    selectionOffset = 0;
-    selectionMore = false;
-    selectionLoading = false;
-    selectionDialog.showModal();
+  async function reloadHistory() {
     const page = await fetchHistory(0);
     if (!page) {
       // No window (launcher menu) or the service is unreachable.
@@ -1331,6 +1333,33 @@
     renderHistory();
     selectionText.scrollTop = selectionText.scrollHeight;
     if (!selectionMore) selectionStatus.textContent = 'Start of history.';
+  }
+
+  function renderJoinToggle() {
+    const on = joinLines();
+    historyJoin.setAttribute('aria-pressed', String(on));
+    historyJoin.title = on
+      ? 'Rows an application wrapped are joined into one line'
+      : 'Showing rows exactly as drawn';
+  }
+
+  historyJoin.addEventListener('click', async () => {
+    try { localStorage.setItem(JOIN_PREF, joinLines() ? '0' : '1'); } catch {}
+    renderJoinToggle();
+    await reloadHistory();
+  });
+
+  async function openSelection() {
+    selectionStatus.textContent = '';
+    historyCount.textContent = '';
+    searchMatches = [];
+    searchIndex = 0;
+    selectionOffset = 0;
+    selectionMore = false;
+    selectionLoading = false;
+    selectionDialog.showModal();
+    renderJoinToggle();
+    await reloadHistory();
   }
 
   selectionText.addEventListener('scroll', async () => {

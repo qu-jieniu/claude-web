@@ -52,6 +52,35 @@ HISTORY_CSI_RE = re.compile(r'\x1b\[[0-9;?]*([A-Za-z])')
 # payload behind as literal characters: `]8;id=...;URL` ... `]8;;`. That is what
 # showed up in front of a login URL.
 HISTORY_OSC8_TEXT_RE = re.compile(r'\]8;[^;]*;([^\]\x1b]*)')
+SGR_ONLY_RE = re.compile(r'\x1b\[[0-9;?]*m')
+
+
+def join_wrapped_lines(lines, width):
+    """Stitch rows that an application laid out itself back into logical lines.
+
+    `capture-pane -J` already joins rows *tmux* wrapped, so what is left are rows
+    the application drew as separate lines - a long URL in a transcript, for
+    instance - and those are exactly `width` columns wide with the text continuing
+    on the next row. Joining them is what makes such a line copyable as one
+    string. A row that is not full width ends the chain, and a shell continuation
+    prompt (`> `) on a continuation row is dropped.
+    """
+    if width <= 0:
+        return lines
+    out = []
+    previous_full = False
+    for line in lines:
+        if out and previous_full and line and not line[0].isspace():
+            out[-1] += line[2:] if line.startswith('> ') else line
+        else:
+            out.append(line)
+        # "Full" allows a few columns of slack, since a TUI with a right margin
+        # never reaches the exact width - but a row *longer* than the width is
+        # already a complete logical line (capture-pane -J joins tmux's own
+        # wrapping), so it must not swallow the row below it.
+        plain = SGR_ONLY_RE.sub('', line)
+        previous_full = width - 4 <= len(plain) <= width and not plain.endswith(' ')
+    return out
 
 
 def _hyperlink_payload(match):
@@ -178,19 +207,19 @@ class UploadHandler(BaseHTTPRequestHandler):
         colour = (query.get('color') or ['0'])[0] not in ('0', '', 'false', 'no')
 
         info = self.tmux('display-message', '-p', '-t', window,
-                         '#{window_id} #{history_size} #{pane_height}')
+                         '#{window_id} #{history_size} #{pane_height} #{pane_width}')
         if not info:
             # No tmux server behind the socket, or the client errored.
             self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'window not found'})
             return
         parts = info.split()
-        if len(parts) < 3 or not parts[0]:
+        if len(parts) < 4 or not parts[0]:
             # tmux exits 0 with empty expansions for an unknown target, so the
             # empty window_id is what actually identifies a bad target.
             self.send_json(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'window not found'})
             return
         try:
-            history_size, pane_height = int(parts[1]), int(parts[2])
+            history_size, pane_height, pane_width = int(parts[1]), int(parts[2]), int(parts[3])
         except ValueError:
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'ok': False, 'error': 'bad tmux reply'})
             return
@@ -225,9 +254,13 @@ class UploadHandler(BaseHTTPRequestHandler):
         lines = text.split('\n')
         if lines and lines[-1] == '':
             lines.pop()
+        # join=0 serves the rows exactly as drawn, for comparison.
+        if (query.get('join') or ['1'])[0] not in ('0', '', 'false', 'no'):
+            lines = join_wrapped_lines(lines, pane_width)
         self.send_json(HTTPStatus.OK, {
             'ok': True, 'window': window, 'offset': offset, 'count': count,
-            'total': total, 'start': start, 'more': start > 0, 'lines': lines,
+            'total': total, 'start': start, 'more': start > 0,
+            'width': pane_width, 'lines': lines,
         })
 
     def handle_history_search(self):

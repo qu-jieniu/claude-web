@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-62` and attaches to
+**Active persistent deployment:** production runs `18.3.2-63` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -2407,3 +2407,26 @@ of the URL when the payload is the target repeated as its own visible text.
 Verified with eight cases covering both forms, SGR, other OSC, unrelated text and
 newline preservation; 36 tests pass, including one that writes the literal text
 form into a pane and asserts a single clean URL comes back.
+
+### Rows an application wrapped are stitched into one line (`18.3.2-63`)
+
+A login URL still copied with line breaks, and with a shell continuation prompt in
+front of the continuation row. `capture-pane -J` joins rows *tmux* wrapped, but
+omp's TUI lays out its own rows: the URL is drawn as separate rows that tmux sees
+as independent lines, which no amount of `-J` can merge.
+
+`/history` now stitches them: a full-width row (measured without colour escapes,
+with four columns of slack so a right margin still counts) continues on the next
+row, and a `> ` continuation prompt on such a row is dropped. A row *longer* than
+the width is already a complete line - `-J` produced it - so it must not swallow
+the row below it, a bug the endpoint tests caught. `/history` returns
+`pane_width` and accepts `join=0` to serve rows as drawn; the dialog has a **Join**
+toggle for that comparison, on by default.
+
+Verified against a live pane: a 60-column row plus an 18-character continuation
+comes back as one 78-character line with `join=1` and as two rows with `join=0`,
+unrelated lines untouched. 48 tests pass - six covering the stitching (chains, the
+continuation prompt, indented rows, colour escapes not counting toward the width,
+no width meaning no joining) and six covering the escape stripping as direct unit
+tests, since the tmux path cannot reproduce what a redrawing TUI leaves behind:
+the shell echoes the payload next to the output.

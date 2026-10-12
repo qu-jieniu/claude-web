@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 upload_globals = runpy.run_path(str(ROOT / 'omp-web-upload'))
 sanitize_filename = upload_globals['sanitize_filename']
+join_wrapped_lines = upload_globals['join_wrapped_lines']
+strip_history_escapes = upload_globals['strip_history_escapes']
 
 
 class FilenameSanitizationTests(unittest.TestCase):
@@ -33,6 +35,69 @@ class FilenameSanitizationTests(unittest.TestCase):
         self.assertEqual(sanitize_filename('.'), 'upload.bin')
         self.assertEqual(sanitize_filename('...'), 'upload.bin')
         self.assertEqual(sanitize_filename('.bashrc'), 'bashrc')
+
+
+class StripHistoryEscapesTests(unittest.TestCase):
+    """Escape handling is a pure function, so test it directly: the tmux path
+    cannot reproduce what a redrawing TUI leaves behind, because the shell echoes
+    the payload alongside the output."""
+
+    def test_osc8_text_form_keeps_one_url(self):
+        url = 'https://example.test/oauth?code=1'
+        self.assertEqual(strip_history_escapes(f']8;id=abc;{url}{url}]8;;'), url)
+        self.assertEqual(strip_history_escapes(f']8;id=abc;{url}]8;;'), url)
+
+    def test_osc8_escape_form_keeps_the_visible_text(self):
+        url = 'https://example.test/oauth?code=1'
+        self.assertEqual(strip_history_escapes(f'\x1b]8;id=abc;{url}\x1b\\{url}\x1b]8;;\x1b\\'), url)
+
+    def test_sgr_colour_survives(self):
+        self.assertEqual(strip_history_escapes('\x1b[1;32mgreen\x1b[0m'), '\x1b[1;32mgreen\x1b[0m')
+
+    def test_other_osc_and_csi_are_dropped(self):
+        self.assertEqual(strip_history_escapes('\x1b]0;title\x07after'), 'after')
+        self.assertEqual(strip_history_escapes('\x1b[2Jcleared'), 'cleared')
+
+    def test_lines_are_never_merged(self):
+        self.assertEqual(strip_history_escapes('one\ntwo'), 'one\ntwo')
+
+    def test_unrelated_text_is_untouched(self):
+        self.assertEqual(strip_history_escapes('seq 1 200'), 'seq 1 200')
+
+
+class JoinWrappedLinesTests(unittest.TestCase):
+    """Rows an application drew itself (a long URL in a transcript) are exactly the
+    pane width wide with the text continuing below; joining them is what makes the
+    line copyable as one string."""
+
+    def test_stitches_rows_that_fill_the_width(self):
+        width = 20
+        full = 'x' * width
+        lines = [full, 'continuation', 'short', 'y' * width, 'tail']
+        self.assertEqual(join_wrapped_lines(lines, width),
+                         [full + 'continuation', 'short', 'y' * width + 'tail'])
+
+    def test_stitches_a_chain_of_rows(self):
+        width = 8
+        self.assertEqual(join_wrapped_lines(['a' * width, 'b' * width, 'c'], width),
+                         ['a' * width + 'b' * width + 'c'])
+
+    def test_drops_a_shell_continuation_prompt(self):
+        width = 10
+        self.assertEqual(join_wrapped_lines(['z' * width, '> rest'], width), ['z' * width + 'rest'])
+
+    def test_leaves_indented_rows_alone(self):
+        width = 10
+        self.assertEqual(join_wrapped_lines(['q' * width, '  indented'], width),
+                         ['q' * width, '  indented'])
+
+    def test_width_ignores_colour_escapes(self):
+        width = 10
+        coloured = '\x1b[31m' + 'r' * width + '\x1b[0m'
+        self.assertEqual(join_wrapped_lines([coloured, 'tail'], width), [coloured + 'tail'])
+
+    def test_no_width_means_no_joining(self):
+        self.assertEqual(join_wrapped_lines(['a', 'b'], 0), ['a', 'b'])
 
 
 class UploadServerTests(unittest.TestCase):
@@ -370,23 +435,6 @@ class HistoryEndpointTests(unittest.TestCase):
         self.assertFalse(any('\x1b' in line for line in page['lines']), 'no escape bytes')
         self.assertEqual(page['lines'].count(url), 1,
                          'the link target must survive as a clean line, exactly once')
-        subprocess.run(self.tmux + ['kill-session', '-t', name], capture_output=True)
-
-    def test_osc8_payload_left_as_text_is_cleaned(self):
-        """tmux strips an OSC 8 it parses, but a TUI redrawing row by row can leave
-        the payload behind as literal characters - which is what appeared in front
-        of the login URL in the dialog."""
-        name = self.long_line_session('osctext')
-        url = 'https://example.test/oauth?code=1'
-        payload = f']8;id=abc;{url}{url}]8;;'
-        subprocess.run(self.tmux + ['send-keys', '-t', name, f"printf '%s\\n' '{payload}'", 'Enter'],
-                       capture_output=True)
-        time.sleep(0.8)
-        status, page = self.get(f'window={name}&count=20')
-        self.assertEqual(status, 200)
-        self.assertEqual(page['lines'].count(url), 1, 'one clean URL, not the payload')
-        self.assertFalse(any(line.startswith(']8;') for line in page['lines']),
-                         'no payload text left at the start of a line')
         subprocess.run(self.tmux + ['kill-session', '-t', name], capture_output=True)
 
     def test_offset_past_history_returns_an_empty_page(self):
