@@ -59,93 +59,22 @@ SGR_ONLY_RE = re.compile(r'\x1b\[[0-9;?]*m')
 # a frame is full width, so a width test alone joins a whole *screen* into one
 # line - and its rows are separate layout lines, not one wrapped line - so they
 # are excluded from stitching. Their contents are still scanned for URLs.
-FRAME_CHARS = set('│┌┐└┘├┤┬┴┼─━┃┏┓┗┛┣┫┳┻╋╭╮╰╯▏▕║═╠╣╦╩╬')
 URL_RE = re.compile(r"https?://[^\s'\"<>\[\]{}]+")
 
 
-def plain(line: str) -> str:
-    """The row's text without colour escapes."""
-    return SGR_ONLY_RE.sub('', line)
-
-
-def is_frame_row(line: str) -> bool:
-    """True for a row a full-screen UI drew, which is never a wrapped line."""
-    stripped = plain(line).strip()
-    return bool(stripped) and (stripped[0] in FRAME_CHARS or stripped[-1] in FRAME_CHARS)
-
-
-def strip_frame(line: str) -> str:
-    """The text inside a frame row, without its border characters."""
-    text = plain(line)
-    start, end = 0, len(text)
-    while start < end and (text[start] in FRAME_CHARS or text[start] == ' '):
-        start += 1
-    while end > start and (text[end - 1] in FRAME_CHARS or text[end - 1] == ' '):
-        end -= 1
-    return text[start:end]
-
-
-def extract_urls(lines, width):
-    """URLs in the history, reassembled across whatever broke them.
-
-    A URL split over rows of a TUI frame is not a wrapped *line* - the frame's
-    border characters break it - so each row is reduced to its content and rows
-    that filled their width are concatenated, which puts the URL back together.
-    """
-    chunks, previous_full = [], False
-    for line in lines:
-        text = strip_frame(line)
-        if chunks and previous_full and text:
-            chunks[-1] += text
-        else:
-            chunks.append(text)
-        previous_full = len(text) >= width - 6
+def extract_urls(lines):
+    """URLs in the history text, deduplicated. Loopback URLs are excluded: omp's
+    own launch shortcut only resolves on the machine running omp, so offering it
+    to a phone is a trap."""
     found, urls = set(), []
-    for match in URL_RE.finditer('\n'.join(chunks)):
-        # A match that crosses a newline ended at it: rows that genuinely continue
-        # one line were concatenated without a newline by the chunking above, so a
-        # newline here means the next row's text is a different line's - and
-        # letting the pattern run on produced '...&code=trueLocal' nonsense.
-        url = match.group(0).split('\n', 1)[0].rstrip('.,;:')
-        # omp's own launch shortcut is loopback-only and cannot work from another
-        # device, so reporting it as a link would be a trap.
+    for match in URL_RE.finditer('\n'.join(lines)):
+        url = match.group(0).rstrip('.,;:')
         if 'localhost' in url or '127.0.0.1' in url:
             continue
         if url not in found:
             found.add(url)
             urls.append(url)
     return urls
-
-
-def join_wrapped_lines(lines, width):
-    """Stitch rows that an application laid out itself back into logical lines.
-
-    `capture-pane -J` already joins rows *tmux* wrapped, so what is left are rows
-    the application drew as separate lines - a long URL in a transcript, for
-    instance - and those are exactly `width` columns wide with the text continuing
-    on the next row. Joining them is what makes such a line copyable as one
-    string. A row that is not full width ends the chain, and a shell continuation
-    prompt (`> `) on a continuation row is dropped.
-    """
-    if width <= 0:
-        return lines
-    out = []
-    previous_full = False
-    for line in lines:
-        # A frame row is a layout line, never a continuation.
-        if (out and previous_full and line and not line[0].isspace()
-                and not is_frame_row(line) and not is_frame_row(out[-1])):
-            out[-1] += line[2:] if line.startswith('> ') else line
-        else:
-            out.append(line)
-        # "Full" allows a few columns of slack, since a TUI with a right margin
-        # never reaches the exact width - but a row *longer* than the width is
-        # already a complete logical line (capture-pane -J joins tmux's own
-        # wrapping), so it must not swallow the row below it.
-        plain = SGR_ONLY_RE.sub('', line)
-        previous_full = width - 4 <= len(plain) <= width and not plain.endswith(' ')
-    return out
-
 
 def _hyperlink_payload(match):
     """Keep one copy of the URL: the payload is usually target + visible text."""
@@ -318,17 +247,14 @@ class UploadHandler(BaseHTTPRequestHandler):
         lines = text.split('\n')
         if lines and lines[-1] == '':
             lines.pop()
-        # join=0 serves the rows exactly as drawn, for comparison.
-        if (query.get('join') or ['1'])[0] not in ('0', '', 'false', 'no'):
-            lines = join_wrapped_lines(lines, pane_width)
         self.send_json(HTTPStatus.OK, {
             'ok': True, 'window': window, 'offset': offset, 'count': count,
             'total': total, 'start': start, 'more': start > 0,
-            'width': pane_width, 'lines': lines,
+            'lines': lines,
             # URLs to offer as copyable one-liners: a URL inside a full-screen UI
             # is broken by the frame's borders, which no amount of row stitching
             # can undo.
-            'links': extract_urls(lines, pane_width),
+            'links': extract_urls(lines),
         })
 
     def handle_history_search(self):

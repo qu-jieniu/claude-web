@@ -399,8 +399,6 @@ dialog textarea {
 #history-links button { flex: none; min-height: 34px; padding: 0 12px; }
 
 .history-search { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
-#history-join[aria-pressed="false"] { opacity: 0.55; }
-
 .history-search input {
   flex: 1;
   min-width: 0;

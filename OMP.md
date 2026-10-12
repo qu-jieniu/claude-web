@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-65` and attaches to
+**Active persistent deployment:** production runs `18.3.2-66` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -2473,3 +2473,25 @@ potentially nasty.
 Verified with a real login run: the authorization URL comes back as one clean
 416-character link, no 'Local' suffix, no launch shortcut. 55 tests pass, two new
 ones covering both.
+
+### The scraping stack is gone (`18.3.2-66`, service)
+
+"there must be a better way", third time, was correct each time and each answer was
+one of: the accreted machinery, the frame heuristic, and now the whole
+screen-scraping shape. What survives:
+
+- `capture-pane -J` + the escape strip - clean text, verified against a real login
+- `extract_urls(lines)` - ten lines over that text, no geometry, no frame
+  machinery, no joining heuristic, no toggle
+- the dialog's Links list as the presentation of it
+
+Deleted this pass: `FRAME_CHARS`, `is_frame_row`, `strip_frame`,
+`join_wrapped_lines`, the `join=` flag, `pane_width` in the response, the Join
+toggle, the per-window `/buffer` endpoint, and their tests. A side effect of the
+deletions: `URL_RE` was removed along with the frame block, which the
+pure-function tests caught.
+
+Also proven with a live `omp login anthropic` run: the paste flow that omp itself
+describes ("if the browser cannot reach this machine, paste the final redirect URL
+or authorization code when prompted") works end to end - the fake code was rejected
+at the token exchange, i.e. the flow reached the right step. 45 tests pass.

@@ -17,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 upload_globals = runpy.run_path(str(ROOT / 'omp-web-upload'))
 sanitize_filename = upload_globals['sanitize_filename']
-join_wrapped_lines = upload_globals['join_wrapped_lines']
 strip_history_escapes = upload_globals['strip_history_escapes']
 extract_urls = upload_globals['extract_urls']
 
@@ -67,83 +66,20 @@ class StripHistoryEscapesTests(unittest.TestCase):
 
 
 class UrlExtractionTests(unittest.TestCase):
-    """A URL inside a full-screen UI is broken by the frame's border characters,
-    which row stitching cannot undo; it is extracted instead."""
+    """Links come from the joined, stripped history text - there is no need to
+    out-think the terminal: capture-pane -J plus escape stripping leaves URLs
+    one line each."""
 
-    WIDTH = 81
+    def test_urls_are_found_and_deduplicated(self):
+        self.assertEqual(extract_urls(['Open: https://a.test/x', 'https://a.test/x', 'none']),
+                         ['https://a.test/x'])
 
-    def frame(self, text):
-        inner = text + ' ' * (self.WIDTH - 4 - len(text))
-        return '│ ' + inner + ' │'
+    def test_loopback_urls_are_not_offered(self):
+        self.assertEqual(extract_urls(['http://localhost:54545/launch']), [])
+        self.assertEqual(extract_urls(['http://127.0.0.1:4000/x']), [])
 
-    def test_url_split_across_frame_rows_is_reassembled(self):
-        url = 'https://claude.ai/oauth/authorize?client_id=abc&code=true'
-        rows = [self.frame(url[:60]), self.frame(url[60:]), self.frame('unrelated')]
-        self.assertEqual(extract_urls(rows, self.WIDTH), [url])
-
-    def test_url_in_plain_output(self):
-        url = 'https://example.test/login?token=abc'
-        self.assertEqual(extract_urls([f'Open this URL: {url}'], self.WIDTH), [url])
-
-    def test_no_urls_means_no_links(self):
-        self.assertEqual(extract_urls(['plain text', 'more text'], self.WIDTH), [])
-
-    def test_duplicates_collapse(self):
-        url = 'https://example.test/x'
-        self.assertEqual(extract_urls([url, url], self.WIDTH), [url])
-
-    def test_split_url_does_not_swallow_the_next_rows_text(self):
-        """A real login prints the URL on a full row and the phrase 'Local
-        shortcut' begins the next row; the extractor must not glue them."""
-        width = 81
-        url = 'https://claude.ai/oauth/authorize?client_id=abc&code=true'
-        rows = [url, 'Local shortcut (this machine only): http://localhost:54545/launch']
-        self.assertEqual(extract_urls(rows, width), [url])
-
-    def test_loopback_shortcuts_are_not_reported_as_links(self):
-        """omp's local launch URL only resolves on the host running omp; offering
-        it as a copyable link from a phone is a trap."""
-        self.assertEqual(extract_urls(['http://localhost:54545/launch'], 81), [])
-        self.assertEqual(extract_urls(['http://127.0.0.1:4000/x'], 81), [])
-
-    def test_frame_rows_are_never_stitched(self):
-        rows = [self.frame('x' * 40), self.frame('y' * 40)]
-        self.assertEqual(join_wrapped_lines(rows, self.WIDTH), rows)
-
-
-class JoinWrappedLinesTests(unittest.TestCase):
-    """Rows an application drew itself (a long URL in a transcript) are exactly the
-    pane width wide with the text continuing below; joining them is what makes the
-    line copyable as one string."""
-
-    def test_stitches_rows_that_fill_the_width(self):
-        width = 20
-        full = 'x' * width
-        lines = [full, 'continuation', 'short', 'y' * width, 'tail']
-        self.assertEqual(join_wrapped_lines(lines, width),
-                         [full + 'continuation', 'short', 'y' * width + 'tail'])
-
-    def test_stitches_a_chain_of_rows(self):
-        width = 8
-        self.assertEqual(join_wrapped_lines(['a' * width, 'b' * width, 'c'], width),
-                         ['a' * width + 'b' * width + 'c'])
-
-    def test_drops_a_shell_continuation_prompt(self):
-        width = 10
-        self.assertEqual(join_wrapped_lines(['z' * width, '> rest'], width), ['z' * width + 'rest'])
-
-    def test_leaves_indented_rows_alone(self):
-        width = 10
-        self.assertEqual(join_wrapped_lines(['q' * width, '  indented'], width),
-                         ['q' * width, '  indented'])
-
-    def test_width_ignores_colour_escapes(self):
-        width = 10
-        coloured = '\x1b[31m' + 'r' * width + '\x1b[0m'
-        self.assertEqual(join_wrapped_lines([coloured, 'tail'], width), [coloured + 'tail'])
-
-    def test_no_width_means_no_joining(self):
-        self.assertEqual(join_wrapped_lines(['a', 'b'], 0), ['a', 'b'])
+    def test_plain_text_yields_nothing(self):
+        self.assertEqual(extract_urls(['just text']), [])
 
 
 class UploadServerTests(unittest.TestCase):
