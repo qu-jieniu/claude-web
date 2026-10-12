@@ -41,23 +41,46 @@ WINDOW_RE = re.compile(r'^[A-Za-z0-9_@:.+-]{1,64}$')
 # an agent CLI wraps an authorization URL in one, and capture-pane hands the raw
 # sequence back, so the dialog showed `]8;id=...;https://...` before the URL and
 # copying it produced that noise instead of a usable link.
-HISTORY_OSC8_RE = re.compile(r'\x1b\]8;[^;]*;([^\x07\x1b\n]*)(?:\x07|\x1b\\)?(?:\1)?')
+HISTORY_OSC8_RE = re.compile(r'\x1b\]8;[^\x07\x1b\n]*(?:\x07|\x1b\\)?')
 HISTORY_OSC_RE = re.compile(r'\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?')
 HISTORY_DCS_RE = re.compile(r'\x1bP[^\x1b\n]*(?:\x1b\\)?')
 HISTORY_CSI_RE = re.compile(r'\x1b\[[0-9;?]*([A-Za-z])')
 
 
+# tmux normally parses an OSC 8 hyperlink and drops it (capture-pane without -e
+# returns just the visible text), but a TUI that redraws row by row can leave the
+# payload behind as literal characters: `]8;id=...;URL` ... `]8;;`. That is what
+# showed up in front of a login URL.
+HISTORY_OSC8_TEXT_RE = re.compile(r'\]8;[^;]*;([^\]\x1b]*)')
+
+
+def _hyperlink_payload(match):
+    """Keep one copy of the URL: the payload is usually target + visible text."""
+    payload = match.group(1)
+    half = len(payload) // 2
+    if half and payload[:half] == payload[half:]:
+        return payload[:half]
+    return payload
+
+
 def strip_history_escapes(text: str) -> str:
     """Return history text with escapes reduced to something copyable."""
-    # A hyperlink whose visible text repeats its target would otherwise come out
-    # doubled - the CLI prints the URL as both - so the duplicate is swallowed.
-    text = HISTORY_OSC8_RE.sub(lambda match: match.group(1), text)
+    # Escape form first: it consumes the whole `ESC ] 8 ; ... ESC \` sequence, and
+    # the text-form pass below would otherwise eat the prefix and leave the ESC.
+    # Drop the sequence; the visible text it wrapped stays. tmux parses most of
+    # these itself, so this is the rare path.
+    # parses most of these itself, so this is the rare path.
+    text = HISTORY_OSC8_RE.sub('', text)
     text = HISTORY_OSC_RE.sub('', text)
     text = HISTORY_DCS_RE.sub('', text)
     text = HISTORY_CSI_RE.sub(lambda match: match.group(0) if match.group(1) == 'm' else '', text)
     # anything left that opens an escape but is not a kept SGR (charset selects,
     # stray ESC bytes)
-    return re.sub(r'\x1b(?!\[[0-9;?]*m)', '', text)
+    text = re.sub(r'\x1b(?!\[[0-9;?]*m)', '', text)
+    # Only now the text form: tmux strips parsed OSC 8 itself, so this catches the
+    # leftovers of a sequence a TUI redrew as literal characters.
+    text = HISTORY_OSC8_TEXT_RE.sub(_hyperlink_payload, text)
+    return text.replace(']8;;', '')
 
 
 def sanitize_filename(filename: str) -> str:

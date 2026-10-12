@@ -12,7 +12,7 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-61` and attaches to
+**Active persistent deployment:** production runs `18.3.2-62` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
 container restarts; the browser reconnects to the same tmux window. Two production
 restarts preserved the current conversation and a test shell. See
@@ -2389,3 +2389,21 @@ into a pane and asserts the target survives as a clean line, exactly once), and
 the strip leaves line counts unchanged. This also explains the earlier "nothing
 changed" report: `18.3.2-57` joined the wrapped rows, but the escape noise was
 the actual reason the URL could not be used.
+
+### OSC 8 payloads that survive as text (`18.3.2-62`, service)
+
+`18.3.2-61` stripped escape sequences, which was necessary but not sufficient:
+tmux **parses** an OSC 8 hyperlink and drops it, so `capture-pane` without `-e`
+already returns a clean URL. What reaches the dialog instead is the *payload as
+literal characters* - `]8;id=...;URL` ... `]8;;` - because a TUI that redraws row
+by row can leave the sequence unparsed. Escape-based patterns cannot match that,
+which is why the previous fix changed nothing on screen.
+
+The strip now handles both forms, in that order: the escape form first (it
+consumes the whole `ESC ] 8 ; ... ESC \` sequence; running the text pass first
+ate the prefix and left a stray ESC behind), then the text form, keeping one copy
+of the URL when the payload is the target repeated as its own visible text.
+
+Verified with eight cases covering both forms, SGR, other OSC, unrelated text and
+newline preservation; 36 tests pass, including one that writes the literal text
+form into a pane and asserts a single clean URL comes back.

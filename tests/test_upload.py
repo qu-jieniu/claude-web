@@ -372,6 +372,23 @@ class HistoryEndpointTests(unittest.TestCase):
                          'the link target must survive as a clean line, exactly once')
         subprocess.run(self.tmux + ['kill-session', '-t', name], capture_output=True)
 
+    def test_osc8_payload_left_as_text_is_cleaned(self):
+        """tmux strips an OSC 8 it parses, but a TUI redrawing row by row can leave
+        the payload behind as literal characters - which is what appeared in front
+        of the login URL in the dialog."""
+        name = self.long_line_session('osctext')
+        url = 'https://example.test/oauth?code=1'
+        payload = f']8;id=abc;{url}{url}]8;;'
+        subprocess.run(self.tmux + ['send-keys', '-t', name, f"printf '%s\\n' '{payload}'", 'Enter'],
+                       capture_output=True)
+        time.sleep(0.8)
+        status, page = self.get(f'window={name}&count=20')
+        self.assertEqual(status, 200)
+        self.assertEqual(page['lines'].count(url), 1, 'one clean URL, not the payload')
+        self.assertFalse(any(line.startswith(']8;') for line in page['lines']),
+                         'no payload text left at the start of a line')
+        subprocess.run(self.tmux + ['kill-session', '-t', name], capture_output=True)
+
     def test_offset_past_history_returns_an_empty_page(self):
         """Past the oldest line tmux clamps -S/-E and would return a stray line."""
         status, page = self.get('window=hist&count=10&offset=999999')
