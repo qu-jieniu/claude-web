@@ -2728,3 +2728,23 @@ re-fits the terminal, and shows a brief confirmation notice.
 The tools area adds `padding-bottom: max(12px, env(safe-area-inset-bottom, 0px))`
 and `padding-left/right: max(8px, env(safe-area-inset-left/right, 0px))` on mobile,
 lifting the buttons above iPhone display corner radii and the iOS home indicator bar.
+
+### Mobile tap-to-focus calibration and copy-mode exit
+
+Tapping the terminal on mobile touchscreens sometimes closed the software
+keyboard automatically or failed to return to the live prompt line:
+
+1. **Tap wobble detection**: A thumb contact area naturally wobbles 8–12px on
+   retina screens. The 8px drag threshold classified minor wobbles as a scroll,
+   skipping `focusTerminal(true)`. The browser saw a tap on a non-input element
+   without synchronous focus, prompting WebKit to dismiss the keyboard. The drag
+   threshold is raised to 14px and taps are judged by whether any lines were
+   actually scrolled (`touch.scrolled`).
+2. **Pointer capture completion**: In WebKit, `lostpointercapture` can fire
+   ahead of `pointerup`. Checking `event.type !== 'pointerup'` treated this
+   normal release as a cancellation (`cancelled = true`), skipping focus.
+   Only `pointercancel` now marks a gesture as cancelled.
+3. **Direct prompt return**: In `tmux.conf`, `MouseDown1Pane` in `copy-mode-vi`
+   and `copy-mode` is bound to `select-pane ; send-keys -X cancel`. A clean tap
+   while scrolled back into history cancels copy-mode, snaps the terminal back
+   to the live prompt row, and focuses the editor.

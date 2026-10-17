@@ -1918,9 +1918,16 @@
     }, true);
   }
 
+  const TOUCH_DRAG_THRESHOLD = 14;
   surface.addEventListener('pointerdown', event => {
     if (event.pointerType !== 'touch') return;
-    touches.set(event.pointerId, { x: event.clientX, y: event.clientY, lastY: event.clientY, moved: false });
+    touches.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+      lastY: event.clientY,
+      moved: false,
+      scrolled: false,
+    });
     if (touches.size > 1) multitouch = true;
     if (touches.size === 1) touchRemainder = 0;
     surface.setPointerCapture(event.pointerId);
@@ -1929,13 +1936,14 @@
   surface.addEventListener('pointermove', event => {
     const touch = touches.get(event.pointerId);
     if (!touch || multitouch) return;
-    if (!touch.moved && Math.hypot(event.clientX - touch.x, event.clientY - touch.y) < 8) return;
+    if (!touch.moved && Math.hypot(event.clientX - touch.x, event.clientY - touch.y) < TOUCH_DRAG_THRESHOLD) return;
     touch.moved = true;
-    suppressMouseUntil = Date.now() + 800;
     touchRemainder += (touch.lastY - event.clientY) / lineHeight() * (term.modes.mouseTrackingMode !== 'none' ? TOUCH_REPORTS_PER_ROW : SCROLL_SPEED);
     touch.lastY = event.clientY;
     const lines = Math.trunc(touchRemainder);
     if (!lines) return;
+    touch.scrolled = true;
+    suppressMouseUntil = Date.now() + 800;
     if (term.modes.mouseTrackingMode !== 'none') {
       // A browser may coalesce a fast swipe into a few large pointer moves.
       // Retain reports beyond the per-move cap instead of silently dropping
@@ -1950,10 +1958,14 @@
   function endTouch(event) {
     const touch = touches.get(event.pointerId);
     if (!touch) return;
-    const cancelled = event.type !== 'pointerup';
-    if (touch.moved || multitouch || cancelled) suppressMouseUntil = Date.now() + 800;
-    else focusTerminal(true);
-    if (touch.moved && !multitouch && !cancelled && term.modes.mouseTrackingMode !== 'none') {
+    const cancelled = event.type === 'pointercancel';
+    if (touch.scrolled || multitouch || cancelled) {
+      suppressMouseUntil = Date.now() + 800;
+    } else {
+      suppressMouseUntil = 0;
+      focusTerminal(true);
+    }
+    if (touch.scrolled && !multitouch && !cancelled && term.modes.mouseTrackingMode !== 'none') {
       const pending = Math.trunc(touchRemainder);
       if (pending) {
         // At most one terminal-height of coalesced movement is flushed. This
