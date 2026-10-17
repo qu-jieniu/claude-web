@@ -2718,8 +2718,13 @@ rows instead of crowding service actions and terminal keys together:
 - **Row 1 (Service actions)**: `Artifacts`, `Select`, `Attach`, `Compose`,
   `Reflow`.
 - **Row 2 (General terminal keys)**: `Copy`, `Paste`, `Esc`, `Enter`, `⌫`, `^C`,
-  `Tab`, `↑`, `↓`, `←`, `→`, `^A`, `^L`, `A−`, `A0`, `A+`, `Detach`, `^D`.
+  `Tab`, `↑`, `↓`, `←`, `→`, `^A`, `A−`, `A0`, `A+`, `Detach`.
 
-`A0` resets terminal font zoom to default (14px), removes any stored
-`terminal-font-size` override from localStorage, re-fits the terminal, and
-shows a brief confirmation notice.
+`^L` (which collided with OMP voice mode) and `^D` (accidental EOF/exit) were
+removed from the default keybar. `A0` resets terminal font zoom to default
+(14px), removes any stored `terminal-font-size` override from localStorage,
+re-fits the terminal, and shows a brief confirmation notice.
+
+The tools area adds `padding-bottom: max(12px, env(safe-area-inset-bottom, 0px))`
+and `padding-left/right: max(8px, env(safe-area-inset-left/right, 0px))` on mobile,
+lifting the buttons above iPhone display corner radii and the iOS home indicator bar.
