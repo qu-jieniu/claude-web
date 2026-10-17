@@ -1637,11 +1637,14 @@
   // mouse sequences from the client stream regardless of mode.
   // Button 64 = wheel up (older history), 65 = wheel down; a downward finger
   // drag and a downward wheel both reveal older content.
-  function sendScrollReports(lines, source) {
-    const count = Math.min(15, Math.abs(lines));
+  const MAX_REPORTS_PER_MOVE = 15;
+  function sendScrollReports(lines, source, limit = MAX_REPORTS_PER_MOVE) {
+    const count = Math.min(limit, Math.abs(lines));
+    if (!count) return 0;
     const { x, y } = cellAt(source.clientX, source.clientY);
     const button = lines > 0 ? 65 : 64;
     sendInput(`\x1b[<${button};${x};${y}M`.repeat(count), true);
+    return Math.sign(lines) * count;
   }
 
   let wheelRemainder = 0;
@@ -1730,10 +1733,13 @@
     touch.lastY = event.clientY;
     const lines = Math.trunc(touchRemainder);
     if (!lines) return;
-    touchRemainder -= lines;
     if (term.modes.mouseTrackingMode !== 'none') {
-      sendScrollReports(lines, event);
+      // A browser may coalesce a fast swipe into a few large pointer moves.
+      // Retain reports beyond the per-move cap instead of silently dropping
+      // distance; endTouch flushes the bounded remainder.
+      touchRemainder -= sendScrollReports(lines, event);
     } else {
+      touchRemainder -= lines;
       term.scrollLines(lines);
     }
   });
@@ -1744,6 +1750,15 @@
     const cancelled = event.type !== 'pointerup';
     if (touch.moved || multitouch || cancelled) suppressMouseUntil = Date.now() + 800;
     else focusTerminal(true);
+    if (touch.moved && !multitouch && !cancelled && term.modes.mouseTrackingMode !== 'none') {
+      const pending = Math.trunc(touchRemainder);
+      if (pending) {
+        // At most one terminal-height of coalesced movement is flushed. This
+        // preserves a real fast swipe without reviving runaway momentum.
+        const limit = Math.ceil(term.rows * TOUCH_REPORTS_PER_ROW);
+        touchRemainder -= sendScrollReports(pending, event, limit);
+      }
+    }
     touches.delete(event.pointerId);
     if (surface.hasPointerCapture(event.pointerId)) surface.releasePointerCapture(event.pointerId);
     if (!touches.size) multitouch = false;

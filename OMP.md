@@ -167,13 +167,14 @@ This keeps reduced page-zoom settings from shrinking the application's height
 twice. Touch pointer capture survives xterm row redraws. Multi-touch is reserved
 for native pinch zoom, and a swipe does not synthesize a terminal click.
 
-Wheel and touch scrolling integrate with tmux copy-mode. A touch drag upward
+Wheel and touch scrolling integrate with tmux copy-mode. A touch drag downward
 emits mouse wheel-up reports to tmux, which enters copy-mode with `copy-mode -e`
-and moves upward through scrollback. Scrolling down back to the live prompt
-uses `scroll-down-and-cancel` to automatically exit copy-mode when reaching the
-bottom. Tracked events are repeated with a bounded count (maximum 15); touch
-movement scales at 1.5× for mouse-tracked panes, preventing accidental runaway
-scrolling.
+and moves upward through scrollback. Dragging upward toward the live prompt
+emits `scroll-down-and-cancel`, automatically exiting copy-mode when it reaches
+the bottom. Tracked events are capped at 15 reports per pointer move; coalesced
+overflow remains in the gesture accumulator and is flushed, up to one terminal
+height, when the finger lifts. Touch movement scales at 4.5 reports per terminal
+row, preserving distance without allowing runaway momentum.
 
 The horizontally scrollable 44px keybar supplies Select, Paste, Attach, Esc, Enter,
 Backspace (⌫), Ctrl-C, Tab, arrows (↑, ↓, ←, →), Ctrl-A prefix, Ctrl-L,
@@ -2322,3 +2323,27 @@ wedged and SSH to that workstation is denied, so this is a diagnosis from the
 screenshot plus the code paths, not a verified fix. The reasoning that makes it
 likely: the faint copy is *smaller* than the real text, which only happens when
 two cell sizes are on screen at once.
+
+### Coalesced mobile swipes retain their full distance
+
+The touch bridge used to subtract the complete calculated scroll distance from
+its accumulator before `sendScrollReports()` capped transmission at 15 reports.
+Mobile browsers coalesce fast gestures into fewer pointer moves, so the result
+depended on event cadence: a 22-row swipe delivered as three moves calculated
+99 reports but sent only 45; the same return swipe delivered as one move sent
+15 and left tmux copy-mode 30 lines above the live OMP editor.
+
+The sender now returns the signed report count it actually transmitted. The
+pointer path subtracts only that count, retains capped overflow, and flushes the
+remaining physical swipe distance on `pointerup`, bounded to one terminal
+height. It does not add inertial scrolling or focus the hidden xterm textarea,
+so returning to the live editor does not unexpectedly open a mobile keyboard.
+
+Live verification used an iPhone-emulated 390x844 viewport and isolated tmux
+window `@36` with 500 history lines and an `ENTRY>` tail. Before the change, a
+three-event swipe followed by a one-event return left
+`pane_in_mode=1 scroll_position=30`, with `ENTRY>` absent. After the change the
+same gestures moved all 99 requested lines, returned
+`pane_in_mode=0`, and rendered `ENTRY>` as the last terminal row. One-event and
+12-event gesture pairs also returned to the live row, proving behavior no
+longer depends on browser pointer-event coalescing.
