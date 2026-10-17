@@ -2770,3 +2770,24 @@ Calendar) using the ergonomic **Catppuccin Mocha** palette:
   - `mail/aerc`: ttyd configured with Catppuccin Mocha JSON theme.
   - `mail/calendar`: Shared shell and Calcure calendar align with the identical
     palette.
+
+### Prevent iOS Safari keyboard blur on terminal touch
+
+On iOS Safari, touching any non-input DOM element (`<div>`, `<canvas>`) while an
+input is focused triggers WebKit's default tap behavior: it immediately blurs the
+active input and begins dismissing the software keyboard. Because touch listeners
+used `passive: true` and deferred focus to `pointerup`, quick taps (<200ms) had
+their keyboard closed before `pointerup` could re-focus, requiring a longer hold
+to keep the keyboard open.
+
+1. **Touchstart blur prevention**: On `touchstart`, when `term.textarea` is
+   focused, calling `event.preventDefault()` prevents WebKit from executing its
+   default blur action, keeping the software keyboard open across touches.
+2. **Synchronous focus on touch-down**: When keyboard is active, `pointerdown`
+   synchronously re-asserts focus on `term.textarea`.
+3. **Deferred pointer capture**: `surface.setPointerCapture` is deferred until
+   swipe movement past `TOUCH_DRAG_THRESHOLD` begins, eliminating premature
+   capture release and lost-pointer-capture cancellations on quick taps.
+4. **Tap-to-prompt SGR dispatch**: Clean taps on mouse-tracked panes emit a
+   `MouseDown1Pane` SGR sequence, triggering tmux's copy-mode cancel binding
+   and snapping directly to the live prompt.

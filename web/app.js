@@ -1919,7 +1919,15 @@
   // xterm's native TouchEvent handlers would also scroll the viewport. Keep
   // the browser's default pinch gesture but let this pointer bridge own swipes.
   for (const name of ['touchstart', 'touchmove', 'touchend']) {
-    surface.addEventListener(name, event => event.stopImmediatePropagation(), { capture: true, passive: true });
+    surface.addEventListener(name, event => {
+      // If the keyboard is already open, preventDefault on touchstart prevents
+      // iOS WebKit from executing its default tap blur on non-input elements,
+      // keeping the keyboard open.
+      if (name === 'touchstart' && document.activeElement === term.textarea) {
+        event.preventDefault();
+      }
+      event.stopImmediatePropagation();
+    }, { capture: true, passive: false });
   }
   for (const name of ['mousedown', 'mouseup', 'click', 'dblclick']) {
     surface.addEventListener(name, event => {
@@ -1942,7 +1950,11 @@
     });
     if (touches.size > 1) multitouch = true;
     if (touches.size === 1) touchRemainder = 0;
-    surface.setPointerCapture(event.pointerId);
+    // If the terminal already has keyboard focus, synchronously re-assert it
+    // on touch-down so iOS Safari never dismisses the virtual keyboard.
+    if (document.activeElement === term.textarea) {
+      term.textarea.focus({ preventScroll: true });
+    }
   });
 
   surface.addEventListener('pointermove', event => {
@@ -1950,6 +1962,9 @@
     if (!touch || multitouch) return;
     if (!touch.moved && Math.hypot(event.clientX - touch.x, event.clientY - touch.y) < TOUCH_DRAG_THRESHOLD) return;
     touch.moved = true;
+    if (!surface.hasPointerCapture(event.pointerId)) {
+      try { surface.setPointerCapture(event.pointerId); } catch {}
+    }
     touchRemainder += (touch.lastY - event.clientY) / lineHeight() * (term.modes.mouseTrackingMode !== 'none' ? TOUCH_REPORTS_PER_ROW : SCROLL_SPEED);
     touch.lastY = event.clientY;
     const lines = Math.trunc(touchRemainder);
@@ -1976,6 +1991,10 @@
     } else {
       suppressMouseUntil = 0;
       focusTerminal(true);
+      if (term.modes.mouseTrackingMode !== 'none') {
+        const { x, y } = cellAt(event.clientX, event.clientY);
+        sendInput(`\x1b[<0;${x};${y}M\x1b[<0;${x};${y}m`, true);
+      }
     }
     if (touch.scrolled && !multitouch && !cancelled && term.modes.mouseTrackingMode !== 'none') {
       const pending = Math.trunc(touchRemainder);
@@ -1992,7 +2011,6 @@
   }
   surface.addEventListener('pointerup', endTouch);
   surface.addEventListener('pointercancel', endTouch);
-  surface.addEventListener('lostpointercapture', endTouch);
 
   connect();
 })();
