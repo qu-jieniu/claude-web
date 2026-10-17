@@ -179,7 +179,7 @@ button:focus-visible, textarea:focus-visible {
   border-top: 1px solid #303b49;
 }
 
-#composer-toggle { flex: none; min-height: 32px; }
+#composer-toggle, #reflow-toggle { flex: none; min-height: 32px; }
 #composer-toggle[aria-expanded="true"] { background: #354d65; }
 
 #composer {

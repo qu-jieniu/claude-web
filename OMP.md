@@ -2383,3 +2383,18 @@ was detected and preserved. Empty OMP input opened an empty disabled panel; a
 shell pane was marked `editor: false` and received no bytes. The textarea kept
 focus on the coarse-pointer surface, all 38 tests passed, and restarting the
 helper service preserved every pre-existing pane PID.
+### Explicit Reflow button clears scrollback and replays transcript
+
+A new **Reflow** button in the tools keybar next to Compose triggers an
+on-demand display reset. In an OMP session (`activeOmpEditorWindow`), it emits
+`Alt-L` (`\x1bl`). OMP responds by issuing `ED2+ED3` (`\x1b[2J\x1b[3J`), which
+clears tmux's pane scrollback history, and replays the entire conversation
+cleanly wrapped to the current column width. In plain shell or non-OMP panes, it
+sends `Ctrl-L` (`\x0c`) for standard shell redraw.
+
+In `tmux.conf`, `bind -T copy-mode M-l` and `bind -T copy-mode-vi M-l` cancel
+copy-mode and forward `M-l`, so tapping Reflow while scrolled back into history
+automatically returns to the live tail and re-renders the clean transcript.
+This avoids the involuntary churn of `resizeScrollback: rebuild` while giving
+the user deliberate, one-tap control over transcript rewrapping after phone
+rotation or font size changes.

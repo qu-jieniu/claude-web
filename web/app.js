@@ -16,6 +16,7 @@
   const sendPaste = document.getElementById('send-paste');
   const composer = document.getElementById('composer');
   const composerToggle = document.getElementById('composer-toggle');
+  const reflowToggle = document.getElementById('reflow-toggle');
   const composerText = document.getElementById('composer-text');
   const composerStatus = document.getElementById('composer-status');
   const composerPaste = document.getElementById('composer-paste');
@@ -874,6 +875,18 @@
     renderComposer();
   }
 
+  reflowToggle.addEventListener('click', () => {
+    if (!composerConnected()) return;
+    if (activeOmpEditorWindow) {
+      // OMP's display reset (Alt-L / \x1bl) emits ED2+ED3 to clear tmux
+      // scrollback and replays one clean transcript wrapped at current columns.
+      // In copy-mode, tmux.conf binds M-l to cancel copy-mode and forward M-l.
+      sendInput('\x1bl', true);
+    } else {
+      // Standard terminal redraw (Ctrl-L) for shell / non-OMP panes.
+      sendInput('\x0c', true);
+    }
+  });
   composerToggle.addEventListener('click', () => {
     if (composer.hidden) void openComposer();
     else setComposerOpen(false);
