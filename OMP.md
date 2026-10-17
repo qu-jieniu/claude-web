@@ -2748,3 +2748,25 @@ keyboard automatically or failed to return to the live prompt line:
    and `copy-mode` is bound to `select-pane ; send-keys -X cancel`. A clean tap
    while scrolled back into history cancels copy-mode, snaps the terminal back
    to the live prompt row, and focuses the editor.
+
+### Unified Catppuccin Mocha theme across homelab web terminals
+
+Unified the color scheme across all three web terminals (OMP, Mail, and
+Calendar) using the ergonomic **Catppuccin Mocha** palette:
+
+- **Astigmatism ergonomics**: Eliminates pitch-black (`#000000`) halation and
+  high-contrast glare. Background is soft charcoal-indigo (`#1e1e2e`), panels and
+  bars use mantle (`#181825`), and text is soft lavender-cream (`#cdd6f4`).
+- **ADHD visual calm**: Replaced saturated neon ANSI colors with muted pastels
+  (soft pink `#f5c2e7`, peach `#fab387`, sage green `#a6e3a1`, sky blue
+  `#89b4fa`).
+- **Stack unification**:
+  - `terminal-common/terminal-shell.css`: `--terminal-shell-*` variables set to
+    Catppuccin tokens.
+  - `omp-web/web/style.css`: All backgrounds, buttons, composer, dialogs, and
+    search match Catppuccin Mocha.
+  - `omp-web/web/app.js`: xterm ANSI 16 palette matches Catppuccin Mocha.
+  - `omp-web/omp-config.yml`: Sets `theme.dark: dark-catppuccin` for OMP TUI.
+  - `mail/aerc`: ttyd configured with Catppuccin Mocha JSON theme.
+  - `mail/calendar`: Shared shell and Calcure calendar align with the identical
+    palette.

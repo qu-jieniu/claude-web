@@ -4,8 +4,8 @@
   --window-bar-height: 36px;
   color-scheme: dark;
   font-family: system-ui, sans-serif;
-  background: #161a21;
-  color: #b4bcca;
+  background: #1e1e2e;
+  color: #cdd6f4;
 }
 
 * { box-sizing: border-box; }
@@ -23,16 +23,16 @@ button {
   min-height: 36px;
   padding: 6px 12px;
   color: inherit;
-  background: #222b37;
-  border: 1px solid #465366;
+  background: #313244;
+  border: 1px solid #45475a;
   border-radius: 5px;
   cursor: pointer;
 }
 
-button:hover { background: #303e50; }
+button:hover { background: #45475a; }
 button:disabled { cursor: not-allowed; opacity: .55; }
 button:focus-visible, textarea:focus-visible {
-  outline: 2px solid #8fcbff;
+  outline: 2px solid #89b4fa;
   outline-offset: 2px;
 }
 
@@ -60,7 +60,7 @@ button:focus-visible, textarea:focus-visible {
   gap: 8px;
   min-width: 0;
   padding: 3px 6px;
-  border-bottom: 1px solid #303b49;
+  border-bottom: 1px solid #313244;
   font-size: 12px;
 }
 
@@ -79,8 +79,8 @@ button:focus-visible, textarea:focus-visible {
   padding: 3px 6px;
   overflow-x: auto;
   overflow-y: hidden;
-  border-bottom: 1px solid #303b49;
-  background: #1b222b;
+  border-bottom: 1px solid #313244;
+  background: #181825;
   touch-action: pan-x;
   scrollbar-width: thin;
 }
@@ -91,8 +91,8 @@ button:focus-visible, textarea:focus-visible {
   padding: 0 10px;
   border: 1px solid #3c4a5c;
   border-radius: 5px;
-  background: #232c37;
-  color: #c8d2e0;
+  background: #313244;
+  color: #cdd6f4;
   font: inherit;
   font-size: 13px;
   white-space: nowrap;
@@ -101,8 +101,8 @@ button:focus-visible, textarea:focus-visible {
 }
 
 #window-bar button[aria-current="true"] {
-  background: #2b4a6b;
-  border-color: #6d9ed6;
+  background: #585b70;
+  border-color: #89b4fa;
   color: #fff;
 }
 
@@ -112,15 +112,15 @@ button:focus-visible, textarea:focus-visible {
    when it was selected; the bell is how a finished omp turn announces itself. */
 #window-bar button[data-bell="1"],
 #window-bar button[data-activity="1"] {
-  border-color: #d6a86d;
-  color: #ffe6c2;
-  box-shadow: inset 0 0 0 1px #d6a86d55;
+  border-color: #fab387;
+  color: #fab387;
+  box-shadow: inset 0 0 0 1px #fab38755;
 }
 
 #window-bar button[data-bell="1"]::before {
   content: '\2022';
   margin-right: 5px;
-  color: #ffcf87;
+  color: #fab387;
 }
 
 #app.drag-over::after {
@@ -131,15 +131,15 @@ button:focus-visible, textarea:focus-visible {
   left: 50%;
   transform: translate(-50%, -50%);
   padding: 12px 18px;
-  border: 1px solid #6d9ed6;
+  border: 1px solid #89b4fa;
   border-radius: 8px;
-  background: #223047;
-  color: #dbe6f5;
+  background: #181825;
+  color: #cdd6f4;
   font-size: 14px;
   pointer-events: none;
 }
 
-#app.drag-over #terminal { outline: 2px dashed #6d9ed6; outline-offset: -3px; }
+#app.drag-over #terminal { outline: 2px dashed #89b4fa; outline-offset: -3px; }
 
 #terminal {
   grid-row: 3;
@@ -165,9 +165,9 @@ button:focus-visible, textarea:focus-visible {
   overscroll-behavior: contain;
   /* xterm.css hard-codes #000 here; keep it on our palette instead so the
      scrollbar gutter / overscroll area doesn't flash pure black. */
-  background-color: #161a21;
+  background-color: #1e1e2e;
 }
-#terminal .xterm:focus-within { outline: 1px solid #51647b; outline-offset: 2px; }
+#terminal .xterm:focus-within { outline: 1px solid #585b70; outline-offset: 2px; }
 
 #terminal-tools {
   grid-row: 5;
@@ -180,7 +180,8 @@ button:focus-visible, textarea:focus-visible {
   padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
   padding-left: max(6px, env(safe-area-inset-left, 0px));
   padding-right: max(6px, env(safe-area-inset-right, 0px));
-  border-top: 1px solid #303b49;
+  border-top: 1px solid #313244;
+  background: #181825;
 }
 
 #service-bar {
@@ -197,12 +198,12 @@ button:focus-visible, textarea:focus-visible {
 }
 
 #composer-toggle, #reflow-toggle { flex: none; min-height: 32px; }
-#composer-toggle[aria-expanded="true"] { background: #354d65; }
+#composer-toggle[aria-expanded="true"] { background: #585b70; }
 #artifact-toggle { flex: none; min-height: 32px; }
 #artifact-toggle[data-count]:not([data-count="0"]) {
-  color: #d9ecff;
-  border-color: #5f89ad;
-  background: #29425a;
+  color: #cdd6f4;
+  border-color: #89b4fa;
+  background: #313244;
 }
 
 #composer {
@@ -212,8 +213,8 @@ button:focus-visible, textarea:focus-visible {
   padding: 4px;
   overflow: auto;
   overscroll-behavior: contain;
-  border-top: 1px solid #465366;
-  background: #202732;
+  border-top: 1px solid #45475a;
+  background: #181825;
 }
 
 #composer-status {
@@ -221,7 +222,7 @@ button:focus-visible, textarea:focus-visible {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
-#composer-status { color: #c5d6ea; }
+#composer-status { color: #a6adc8; }
 #composer-text {
   display: block;
   width: 100%;
@@ -231,8 +232,8 @@ button:focus-visible, textarea:focus-visible {
   resize: none;
   padding: 8px;
   color: inherit;
-  background: #161a21;
-  border: 1px solid #64758b;
+  background: #1e1e2e;
+  border: 1px solid #45475a;
   border-radius: 4px;
   font-size: 16px;
   line-height: 1.35;
@@ -247,10 +248,10 @@ button:focus-visible, textarea:focus-visible {
   flex-wrap: wrap;
   gap: 6px;
   padding: 4px 0;
-  background: #202732;
+  background: #181825;
 }
 .composer-actions button { min-width: 44px; min-height: 44px; padding: 6px 8px; }
-#composer-paste { margin-left: auto; background: #294a3c; }
+#composer-paste { margin-left: auto; background: #a6e3a1; color: #11111b; font-weight: 600; }
 
 
 dialog {
@@ -258,9 +259,9 @@ dialog {
   max-height: calc(100% - 24px);
   padding: 20px;
   overflow: auto;
-  background: #202732;
+  background: #181825;
   color: inherit;
-  border: 1px solid #64758b;
+  border: 1px solid #45475a;
   border-radius: 8px;
 }
 
@@ -274,9 +275,9 @@ dialog textarea {
   min-height: 90px;
   resize: vertical;
   padding: 8px;
-  background: #161a21;
+  background: #1e1e2e;
   color: inherit;
-  border: 1px solid #64758b;
+  border: 1px solid #45475a;
   border-radius: 4px;
   font-size: 16px;
 }
@@ -300,8 +301,8 @@ dialog textarea {
 .artifact-card {
   min-width: 0;
   padding: 8px;
-  background: #161a21;
-  border: 1px solid #465366;
+  background: #1e1e2e;
+  border: 1px solid #45475a;
   border-radius: 6px;
 }
 .artifact-preview {
@@ -309,7 +310,7 @@ dialog textarea {
   min-height: 120px;
   align-items: center;
   justify-content: center;
-  background: #0e1116;
+  background: #11111b;
   overflow: hidden;
 }
 .artifact-card img {
@@ -327,7 +328,7 @@ dialog textarea {
 }
 .artifact-name {
   margin: 8px 0 0;
-  color: #e0e8f2;
+  color: #cdd6f4;
   font-size: 14px;
   font-weight: 600;
   overflow-wrap: anywhere;
@@ -338,11 +339,11 @@ dialog textarea {
   justify-content: space-between;
   gap: 8px;
   margin-top: 8px;
-  color: #c5d6ea;
+  color: #a6adc8;
   font-size: 12px;
 }
 .artifact-meta span { overflow-wrap: anywhere; }
-.artifact-meta a { flex: none; color: #9bc9f1; }
+.artifact-meta a { flex: none; color: #89b4fa; }
 
 #selection-dialog { width: min(720px, calc(100% - 16px)); padding: 12px; }
 /* History view: real DOM text (so it is selectable and searchable), colour
@@ -354,8 +355,8 @@ dialog textarea {
   padding: 8px;
   overflow: auto;
   white-space: pre;
-  background: #161a21;
-  border: 1px solid #64758b;
+  background: #1e1e2e;
+  border: 1px solid #45475a;
   border-radius: 4px;
   font-family: ui-monospace, monospace;
   font-size: 13px;
@@ -364,9 +365,8 @@ dialog textarea {
   -webkit-user-select: text;
   touch-action: auto;
 }
-#selection-text .match { background: #6b5320; color: #f5ecd8; } /* 6.2:1; the inherited
-   foreground was 3.8:1, and an ANSI colour inside a match could be worse */
-#selection-text .match.current { background: #b8860b; color: #161a21; }
+#selection-text .match { background: #585b70; color: #cdd6f4; }
+#selection-text .match.current { background: #fab387; color: #11111b; }
 .history-search { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
 .history-search input {
   flex: 1;
@@ -374,8 +374,8 @@ dialog textarea {
   padding: 6px 8px;
   font-size: 16px;
   color: inherit;
-  background: #161a21;
-  border: 1px solid #64758b;
+  background: #1e1e2e;
+  border: 1px solid #45475a;
   border-radius: 4px;
 }
 .history-search button { min-width: 40px; min-height: 40px; }

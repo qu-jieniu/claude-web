@@ -1,5 +1,10 @@
 # Applied only to omp processes launched by this application.
-# Preserve native history when the mobile keyboard changes terminal height.
+# Preserve native tmux history across terminal resizes. Rebuild erases and
+# replays the complete transcript on every settled size, including the repeated
+# height-only changes produced by a mobile keyboard; that makes scrollback churn
+# even though no line wrapping changed.
 tui:
   mouse: true
   resizeScrollback: preserve
+theme:
+  dark: dark-catppuccin
