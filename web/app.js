@@ -877,15 +877,11 @@
 
   reflowToggle.addEventListener('click', () => {
     if (!composerConnected()) return;
-    if (activeOmpEditorWindow) {
-      // OMP's display reset (Alt-L / \x1bl) emits ED2+ED3 to clear tmux
-      // scrollback and replays one clean transcript wrapped at current columns.
-      // In copy-mode, tmux.conf binds M-l to cancel copy-mode and forward M-l.
-      sendInput('\x1bl', true);
-    } else {
-      // Standard terminal redraw (Ctrl-L) for shell / non-OMP panes.
-      sendInput('\x0c', true);
-    }
+    // OMP's display reset (Alt-L / \x1bl) emits ED2+ED3 to clear tmux
+    // scrollback and replays one clean transcript wrapped at current columns.
+    // In copy-mode, tmux.conf binds M-l to cancel copy-mode and forward M-l.
+    // Never send \x0c (Ctrl-L): in OMP, Ctrl-L toggles voice listening mode!
+    sendInput('\x1bl', true);
   });
   composerToggle.addEventListener('click', () => {
     if (composer.hidden) void openComposer();

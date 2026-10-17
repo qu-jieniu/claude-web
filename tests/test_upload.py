@@ -42,6 +42,9 @@ class OmpEditorDetectionTests(unittest.TestCase):
                  '--config /home/user/omp-web/omp-config.yml')
         self.assertTrue(is_omp_editor('bun', start))
         self.assertTrue(is_omp_editor('omp', 'omp --allow-home'))
+        self.assertTrue(is_omp_editor('bash', start, 'π > My Topic'))
+        self.assertTrue(is_omp_editor('bash', start, 'π ⠋ Generating…'))
+        self.assertFalse(is_omp_editor('bash', start, 'bash'))
         self.assertFalse(is_omp_editor('bash', start))
         self.assertFalse(is_omp_editor('bun', 'bun run another-app'))
 

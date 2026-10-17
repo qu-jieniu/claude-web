@@ -33,14 +33,16 @@ WINDOW_LIST_FORMAT = '\t'.join([
     '#{session_name}', '#{window_index}', '#{window_name}', '#{window_id}',
     '#{window_active}', '#{pane_dead}', '#{window_activity_flag}', '#{window_bell_flag}',
     '#{?pane_current_path,#{pane_current_path},#{pane_start_path}}',
-    '#{pane_current_command}', '#{pane_start_command}',
+    '#{pane_current_command}', '#{pane_start_command}', '#{pane_title}',
 ])
 WINDOW_RE = re.compile(r'^[A-Za-z0-9_@:.+-]{1,64}$')
 OMP_START_RE = re.compile(r'(?:^|[\s/])omp(?:\s|$)')
 
 
-def is_omp_editor(current_command: str, start_command: str) -> bool:
+def is_omp_editor(current_command: str, start_command: str, title: str = '') -> bool:
     """True only while an OMP process owns the pane's interactive editor."""
+    if title.startswith('π'):
+        return True
     return current_command in {'bun', 'omp'} and bool(OMP_START_RE.search(start_command))
 
 
@@ -272,10 +274,10 @@ class UploadHandler(BaseHTTPRequestHandler):
             return
         windows = []
         for raw in listing.splitlines():
-            fields = raw.split('\t', 10)
-            if len(fields) != 11:
+            fields = raw.split('\t', 11)
+            if len(fields) != 12:
                 continue
-            session, index, name, window, active, dead, activity, bell, path, command, start = fields
+            session, index, name, window, active, dead, activity, bell, path, command, start, title = fields
             windows.append({
                 'session': session, 'index': index, 'name': name, 'id': window,
                 'active': active == '1', 'dead': dead == '1',
@@ -287,7 +289,7 @@ class UploadHandler(BaseHTTPRequestHandler):
                 'path': path,
                 # The browser may request OMP's built-in "copy prompt" action
                 # only while OMP, not its post-exit shell, owns this pane.
-                'editor': is_omp_editor(command, start),
+                'editor': is_omp_editor(command, start, title),
             })
         windows.sort(key=lambda w: (w['session'], int(w['index']) if w['index'].isdigit() else 0))
         self.send_json(HTTPStatus.OK, {'ok': True, 'windows': windows})
