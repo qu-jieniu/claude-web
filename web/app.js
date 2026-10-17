@@ -6,14 +6,7 @@
   const connection = document.getElementById('connection');
   const reconnect = document.getElementById('reconnect');
   const keybar = document.getElementById('keybar');
-  const prefix = document.getElementById('prefix');
-  const notice = document.getElementById('notice');
-  const noticeText = document.getElementById('notice-text');
-  const noticeCopy = document.getElementById('notice-copy');
-  const copiedFlash = document.getElementById('copied-flash');
-  const pasteDialog = document.getElementById('paste-dialog');
-  const pasteText = document.getElementById('paste-text');
-  const sendPaste = document.getElementById('send-paste');
+  let terminalShell = null;
   const composer = document.getElementById('composer');
   const composerToggle = document.getElementById('composer-toggle');
   const reflowToggle = document.getElementById('reflow-toggle');
@@ -23,8 +16,14 @@
   const composerClear = document.getElementById('composer-clear');
   const composerAttach = document.getElementById('composer-attach');
   const fileUploader = document.getElementById('file-uploader');
+  const artifactButton = document.getElementById('artifact-toggle');
+  const artifactDialog = document.getElementById('artifact-dialog');
+  const artifactStatus = document.getElementById('artifact-status');
+  const artifactGallery = document.getElementById('artifact-gallery');
+  const refreshArtifacts = document.getElementById('refresh-artifacts');
+  const closeArtifacts = document.getElementById('close-artifacts');
 
-  if (!window.Terminal || !window.FitAddon) {
+  if (!window.Terminal || !window.FitAddon || !window.TerminalShell) {
     connection.textContent = 'Terminal assets could not load. Reload this page to try again.';
     connection.dataset.state = 'disconnected';
     reconnect.addEventListener('click', () => location.reload());
@@ -47,19 +46,6 @@
     return DEFAULT_FONT_SIZE;
   }
 
-  function adjustFontSize(delta) {
-    const current = term.options.fontSize || DEFAULT_FONT_SIZE;
-    const target = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, current + delta));
-    if (target === current) return;
-    term.options.fontSize = target;
-    try {
-      localStorage.setItem('terminal-font-size', String(target));
-    } catch {}
-    // Glyphs are cached per size: without dropping the cache, text can appear at
-    // the old size behind the new one.
-    term.clearTextureAtlas?.();
-    scheduleFit();
-  }
 
   const term = new Terminal({
     fontFamily: 'ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace',
@@ -168,14 +154,18 @@
   // SIXEL for images - which a plain xterm.js drops, leaving the blank block it
   // had reserved. Render them instead (SIXEL + iTerm2 IIP); the addon manages
   // its own layers, so it works with either renderer.
+  let imageAddon = null;
   if (window.ImageAddon) {
     try {
-      term.loadAddon(new ImageAddon.ImageAddon({
+      imageAddon = new ImageAddon.ImageAddon({
         sixelSupport: true,
         iipSupport: true,
         showPlaceholder: true,
-      }));
-    } catch {}
+      });
+      term.loadAddon(imageAddon);
+    } catch {
+      imageAddon = null;
+    }
   }
   window.term = term;
   term.textarea.setAttribute('aria-label', 'Terminal input');
@@ -189,8 +179,8 @@
   let reconnectTimer = null;
   let retryCount = 0;
   let leaving = false;
-  let prefixArmed = false;
   let fitFrame = null;
+  let lastFitBox = { width: 0, height: 0, dpr: 0 };
   let composerComposing = false;
   let composerMessage = '';
   let composerSyncing = false;
@@ -209,6 +199,296 @@
   // a local call and this only runs while the tab is visible.
   const WINDOW_BAR_INTERVAL_MS = 3000;
   const COMPOSER_SYNC_TIMEOUT_MS = 1200;
+  const ARTIFACT_SCAN_DELAY_MS = 180;
+  const IMAGE_PROTOCOL_HEADER_BYTES = 96;
+  const IIP_MARKER = encoder.encode('\x1b]1337;File=');
+  const seenArtifactCanvases = new WeakSet();
+  let artifactScanTimer = null;
+  let artifactListRequest = 0;
+  let artifactCaptureErrorShown = false;
+  let imageProtocolEscape = false;
+  let sixelHeaderBytesRemaining = 0;
+  let iipMarkerOffset = 0;
+
+  let terminalState = 'connecting';
+  const terminalStateListeners = new Set();
+  const terminalAdapter = {
+    focus: focusTerminal,
+    send: data => sendInput(data, true),
+    paste: pasteToTerminal,
+    getSelection: () => term.getSelection(),
+    clearSelection: () => term.clearSelection(),
+    fit: scheduleFit,
+    getFontSize: () => term.options.fontSize || DEFAULT_FONT_SIZE,
+    setFontSize(size) {
+      if (size === term.options.fontSize) return true;
+      term.options.fontSize = size;
+      // Mail exposed the failure mode: xterm can retain glyph metrics measured
+      // before a font/size transition. Drop the atlas before every shared-shell
+      // zoom, then let the existing fit path remeasure and send pixel geometry.
+      term.clearTextureAtlas?.();
+      scheduleFit();
+      return true;
+    },
+    reconnect() {
+      retryCount = 0;
+      connect();
+    },
+    state: () => terminalState,
+    subscribeState(listener) {
+      terminalStateListeners.add(listener);
+      listener(terminalState, terminalState === 'connected' ? 'Connected' : 'Connecting…');
+      return () => terminalStateListeners.delete(listener);
+    },
+    whenReady(listener) { listener(term); },
+  };
+  terminalShell = TerminalShell.mount({
+    host: app,
+    fitTarget: host,
+    selectionTarget: host,
+    copyFlashHost: term.element,
+    keybar,
+    appActions: document.getElementById('service-bar'),
+    connection,
+    reconnect,
+    adapter: terminalAdapter,
+    minFontSize: MIN_FONT_SIZE,
+    maxFontSize: MAX_FONT_SIZE,
+    startupFitDelays: [100, 400, 1000],
+    features: { copyFlash: true },
+    actions: {
+      select: openSelection,
+      attach: openFilePicker,
+    },
+    onEmptyClipboard: async () => {
+      const image = await readClipboardImage();
+      if (image) {
+        await uploadFiles([image]);
+        return true;
+      }
+      const appleTouch = applePlatform && navigator.maxTouchPoints > 0;
+      showNotice(navigator.clipboard?.read
+        ? 'Nothing to paste: the clipboard holds no text or image. Use Attach for a file.'
+        : appleTouch
+          ? 'Nothing to paste as text. Use Attach to pick a photo or a file.'
+          : 'Nothing to paste as text. Press the paste shortcut (⌘V) for an image, or use Attach.');
+      return true;
+    },
+  });
+  TerminalShell.enablePlainDragSelection(() => term);
+
+  function artifactWindowTarget() {
+    const match = currentArg?.match(/^tmux-(\d+)$/);
+    return match ? `@${match[1]}` : null;
+  }
+
+  function setArtifactCount(count) {
+    const safeCount = Number.isInteger(count) && count > 0 ? count : 0;
+    artifactButton.dataset.count = String(safeCount);
+    artifactButton.textContent = safeCount ? `Artifacts (${safeCount})` : 'Artifacts';
+    artifactButton.disabled = !artifactWindowTarget();
+  }
+
+  async function fetchArtifacts(target) {
+    const response = await fetch(`/artifacts?window=${encodeURIComponent(target)}`,
+                                 { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok || !data?.ok || !Array.isArray(data.artifacts)) {
+      throw new Error(data?.error || `Artifact list failed (${response.status}).`);
+    }
+    return data;
+  }
+
+  async function refreshArtifactCount() {
+    const target = artifactWindowTarget();
+    if (!target) {
+      setArtifactCount(0);
+      return;
+    }
+    try {
+      const data = await fetchArtifacts(target);
+      if (target === artifactWindowTarget()) setArtifactCount(data.count);
+    } catch {
+      if (target === artifactWindowTarget()) {
+        artifactButton.textContent = 'Artifacts';
+        artifactButton.dataset.count = '0';
+      }
+    }
+  }
+
+  function formatArtifactSize(size) {
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function artifactCard(item) {
+    const card = document.createElement('article');
+    card.className = 'artifact-card';
+    let preview;
+    if (item.preview) {
+      preview = document.createElement('a');
+      preview.href = item.url;
+      preview.target = '_blank';
+      preview.rel = 'noopener';
+      preview.setAttribute('aria-label', `Open ${item.name}`);
+      const image = document.createElement('img');
+      image.src = item.url;
+      image.alt = item.name;
+      image.loading = 'lazy';
+      preview.appendChild(image);
+    } else {
+      preview = document.createElement('div');
+      const icon = document.createElement('span');
+      icon.className = 'artifact-file-icon';
+      const extension = item.name.includes('.') ? item.name.split('.').pop() : 'FILE';
+      icon.textContent = extension.slice(0, 8).toUpperCase();
+      preview.appendChild(icon);
+    }
+    preview.classList.add('artifact-preview');
+    const name = document.createElement('p');
+    name.className = 'artifact-name';
+    name.textContent = item.name;
+    const metadata = document.createElement('div');
+    metadata.className = 'artifact-meta';
+    const description = document.createElement('span');
+    const source = {
+      agent: 'Agent',
+      'browser-upload': 'Uploaded',
+      'terminal-image': 'Terminal image',
+    }[item.source] || 'Artifact';
+    description.textContent = `${source} · ${formatArtifactSize(item.size)} · ${new Date(item.created).toLocaleString()}`;
+    const download = document.createElement('a');
+    download.href = item.downloadUrl;
+    download.download = item.name;
+    download.textContent = 'Download';
+    metadata.append(description, download);
+    card.append(preview, name, metadata);
+    return card;
+  }
+
+  async function renderArtifactGallery() {
+    const target = artifactWindowTarget();
+    const request = ++artifactListRequest;
+    artifactGallery.replaceChildren();
+    if (!target) {
+      artifactStatus.textContent = 'Open a terminal window to view its artifacts.';
+      return;
+    }
+    artifactStatus.textContent = 'Loading artifacts…';
+    try {
+      const data = await fetchArtifacts(target);
+      if (request !== artifactListRequest || target !== artifactWindowTarget()) return;
+      setArtifactCount(data.count);
+      artifactGallery.replaceChildren(...data.artifacts.map(artifactCard));
+      artifactStatus.textContent = data.count
+        ? `${data.count} artifact${data.count === 1 ? '' : 's'}, newest first.`
+        : 'No artifacts for this terminal window yet.';
+    } catch (error) {
+      if (request !== artifactListRequest) return;
+      artifactStatus.textContent = error.message || 'Artifacts could not be loaded.';
+    }
+  }
+
+  function containsImageProtocol(bytes) {
+    let found = false;
+    for (const byte of bytes) {
+      if (sixelHeaderBytesRemaining > 0) {
+        if (byte === 0x71) {
+          found = true;
+          sixelHeaderBytesRemaining = 0;
+        } else {
+          sixelHeaderBytesRemaining -= 1;
+        }
+      }
+
+      if (imageProtocolEscape && byte === 0x50) {
+        sixelHeaderBytesRemaining = IMAGE_PROTOCOL_HEADER_BYTES;
+      }
+      imageProtocolEscape = byte === 0x1b;
+
+      if (byte === IIP_MARKER[iipMarkerOffset]) {
+        iipMarkerOffset += 1;
+        if (iipMarkerOffset === IIP_MARKER.length) {
+          found = true;
+          iipMarkerOffset = 0;
+        }
+      } else {
+        iipMarkerOffset = byte === IIP_MARKER[0] ? 1 : 0;
+      }
+    }
+    return found;
+  }
+
+  function canvasPng(canvas) {
+    return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+  }
+
+  async function saveArtifactCanvas(canvas, target) {
+    const blob = await canvasPng(canvas);
+    if (!blob) throw new Error('The rendered image could not be encoded.');
+    const response = await fetch(`/artifacts?window=${encodeURIComponent(target)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'image/png',
+        'X-Artifact-Name': 'terminal-image.png',
+        'X-Artifact-Source': 'terminal-image',
+      },
+      body: blob,
+    });
+    const result = await response.json();
+    if (!response.ok || !result?.ok) {
+      throw new Error(result?.error || `Artifact save failed (${response.status}).`);
+    }
+    artifactCaptureErrorShown = false;
+    if (target === artifactWindowTarget()) {
+      refreshArtifactCount();
+      if (artifactDialog.open) renderArtifactGallery();
+    }
+  }
+
+  function scanArtifactCanvases() {
+    clearTimeout(artifactScanTimer);
+    artifactScanTimer = null;
+    const target = artifactWindowTarget();
+    if (!imageAddon || !target || document.hidden || leaving) return;
+    const buffer = term.buffer.active;
+    const firstRow = buffer.viewportY;
+    const lastRow = Math.min(buffer.length, firstRow + term.rows);
+    for (let y = firstRow; y < lastRow; y += 1) {
+      for (let x = 0; x < term.cols; x += 1) {
+        const canvas = imageAddon.getImageAtBufferCell(x, y);
+        if (!canvas || seenArtifactCanvases.has(canvas)) continue;
+        seenArtifactCanvases.add(canvas);
+        saveArtifactCanvas(canvas, target).catch(error => {
+          if (artifactCaptureErrorShown) return;
+          artifactCaptureErrorShown = true;
+          showNotice(error.message || 'A rendered image could not be saved.');
+        });
+      }
+    }
+  }
+
+  function scheduleArtifactScan() {
+    clearTimeout(artifactScanTimer);
+    artifactScanTimer = setTimeout(scanArtifactCanvases, ARTIFACT_SCAN_DELAY_MS);
+  }
+
+  // Ordinary terminal output includes every tmux scroll repaint. Scanning the
+  // full grid after each write made one wheel notch perform cols*rows image
+  // lookups. Only protocol-bearing writes can add an image; resize and tab
+  // switch paths retain their explicit scans.
+  term.onResize(scheduleArtifactScan);
+  artifactButton.addEventListener('click', () => {
+    artifactDialog.showModal();
+    renderArtifactGallery();
+  });
+  refreshArtifacts.addEventListener('click', renderArtifactGallery);
+  closeArtifacts.addEventListener('click', () => artifactDialog.close());
+  artifactDialog.addEventListener('close', () => focusTerminal());
+  setArtifactCount(0);
+
+  refreshArtifactCount();
 
   // Tells the discord-alert extension "this specific tmux window is on screen
   // right now", independent of whether the WebSocket/tmux client is still
@@ -298,6 +578,7 @@
       // Keep the last known list: the bar is navigation, not authoritative state.
     } finally {
       windowBarBusy = false;
+      refreshArtifactCount();
     }
   }
 
@@ -313,6 +594,9 @@
   }
 
   windowBar.addEventListener('click', async event => {
+    // Persist any image still belonging to the old window before tmux replaces
+    // its screen and title with the selected one.
+    scanArtifactCanvases();
     const button = event.target.closest('button[data-window]');
     if (!button || button.getAttribute('aria-current') === 'true') return;
     // Show the tap immediately, then let the next refresh confirm it.
@@ -334,86 +618,30 @@
   // Kept so the notice's Copy button can retry inside a real gesture.
   let pendingClipboard = null;
 
-  let noticeTimer = null;
-
-  /** Show the notice bar. copyText keeps a Copy button available; autoHideMs
-   *  clears it again after a confirmation (a blocked copy stays until
-   *  dismissed, because it still needs an action). */
+  /** Present all status through the shared shell. copyText keeps a gesture-backed
+   *  retry action for asynchronous OSC 52 requests. */
   function showNotice(message, copyText = null, autoHideMs = 0) {
-    clearTimeout(noticeTimer);
-    noticeTimer = autoHideMs ? setTimeout(hideNotice, autoHideMs) : null;
-    noticeText.textContent = message;
     pendingClipboard = copyText;
     pendingClipboardAt = Date.now();
-    noticeCopy.hidden = !copyText;
-    notice.hidden = false;
+    if (copyText) {
+      terminalShell.offerCopy(copyText, message);
+      return;
+    }
+    terminalShell.notice.show(message, { timeout: autoHideMs });
   }
 
-  let copiedFlashAnimation = null;
-
-  /** Flash the scissors pill: something just landed on the clipboard. */
   function flashCopied() {
-    copiedFlash.hidden = false;
-    copiedFlashAnimation?.cancel();
-    copiedFlashAnimation = copiedFlash.animate([
-      { opacity: 0, transform: 'translateX(-50%) scale(0.85)' },
-      { opacity: 1, transform: 'translateX(-50%) scale(1)', offset: 0.18 },
-      { opacity: 1, transform: 'translateX(-50%) scale(1)', offset: 0.7 },
-      { opacity: 0, transform: 'translateX(-50%) scale(0.95)' },
-    ], { duration: 850, easing: 'ease-out' });
-    copiedFlashAnimation.onfinish = () => {
-      copiedFlash.hidden = true;
-      copiedFlashAnimation = null;
-    };
+    terminalShell.flashCopied();
   }
 
   function hideNotice() {
-    clearTimeout(noticeTimer);
-    noticeTimer = null;
-    notice.hidden = true;
     pendingClipboard = null;
-    noticeCopy.hidden = true;
+    terminalShell.notice.hide();
   }
 
-  /** Put text on the clipboard inside a live user gesture. Returns true on
-   *  success. The synchronous command runs first: WebKit only honours a gesture
-   *  within the task that started it, and a real clipboard rejection from Safari
-   *  arrives in a later task, so a fallback placed after an await has no gesture
-   *  left and fails as well. */
-  function copyInGesture(text) {
-    const scratch = document.createElement('textarea');
-    scratch.value = text;
-    scratch.setAttribute('readonly', '');
-    scratch.style.position = 'fixed';
-    scratch.style.top = '-1000px';
-    document.body.appendChild(scratch);
-    scratch.select();
-    let copied = false;
-    try { copied = document.execCommand('copy'); } catch {}
-    scratch.remove();
-    return copied;
-  }
-
-  /** Put text on the clipboard. Returns true on success. */
   async function writeClipboard(text) {
-    if (navigator.clipboard?.writeText) {
-      try { await navigator.clipboard.writeText(text); return true; } catch {}
-    }
-    return false;
+    return terminalShell.writeClipboard(text);
   }
-
-  noticeCopy.addEventListener('click', async () => {
-    const text = pendingClipboard;
-    if (!text) return;
-    // Synchronous first, while this click's gesture is guaranteed to be live.
-    const copied = copyInGesture(text) || await writeClipboard(text);
-    if (copied) {
-      hideNotice();
-      flashCopied();
-      return;
-    }
-    noticeText.textContent = 'Copy was refused by the browser. Select the text and copy it manually.';
-  });
 
   // tmux copies on its own, so no gesture backs the OSC 52 write and browsers
   // refuse it - hence the notice. A Mac user's reflex after selecting is
@@ -437,10 +665,6 @@
     flashCopied();
   });
 
-  document.getElementById('dismiss-notice').addEventListener('click', () => {
-    hideNotice();
-    focusTerminal();
-  });
 
   function focusTerminal(force = false) {
     if (!document.querySelector('dialog[open]') && !composer.contains(document.activeElement)) {
@@ -452,24 +676,14 @@
   }
 
   function setPrefix(armed) {
-    prefixArmed = armed;
-    prefix.setAttribute('aria-pressed', String(armed));
-    prefix.setAttribute('aria-label', armed
-      ? 'Control A prefix armed; the next key is a multiplexer command'
-      : 'Control A, multiplexer prefix');
+    terminalShell?.setPrefix(armed);
   }
 
   function setConnection(state, message) {
-    connection.dataset.state = state;
-    connection.textContent = message;
-    const connected = state === 'connected';
-    connection.closest('.connection-bar').hidden = connected;
-    term.options.disableStdin = !connected;
-    for (const button of keybar.querySelectorAll('button')) {
-      button.disabled = button.dataset.key !== 'select' && !connected;
-    }
-    sendPaste.disabled = !connected;
-    if (!connected) setPrefix(false);
+    terminalState = state;
+    term.options.disableStdin = state !== 'connected';
+    if (state !== 'connected') setPrefix(false);
+    for (const listener of terminalStateListeners) listener(state, message);
     renderComposer();
     scheduleFit();
   }
@@ -489,43 +703,46 @@
       app.style.height = `${Math.max(1, Math.floor(height))}px`;
       app.style.top = `${viewport && zoom <= 1.01 ? viewport.offsetTop : 0}px`;
       app.style.setProperty('--composer-max-height', `${Math.max(100, Math.min(190, height * .34))}px`);
-      if (host.clientWidth > 0 && host.clientHeight > 0) {
+      const width = host.clientWidth;
+      const hostHeight = host.clientHeight;
+      if (width > 0 && hostHeight > 0) {
         const cols = term.cols;
         const rows = term.rows;
+        const boxChanged = width !== lastFitBox.width
+          || hostHeight !== lastFitBox.height
+          || devicePixelRatio !== lastFitBox.dpr;
+        lastFitBox = { width, height: hostHeight, dpr: devicePixelRatio };
         fit.fit();
-        if (term.cols !== cols || term.rows !== rows) {
-          // A resize re-wraps and repaints. The canvas renderer can otherwise
-          // keep rows from the previous geometry on screen - seen as the same
-          // text twice, at two different cell sizes - so drop its glyph cache
-          // and force a full repaint.
+        if (boxChanged || term.cols !== cols || term.rows !== rows) {
+          // Rebuild even when the pixel box changed without crossing a whole
+          // cell boundary. The DOM renderer otherwise retains stale row
+          // backgrounds; canvas can retain glyphs at the old scale.
           term.clearTextureAtlas?.();
           term.refresh(0, term.rows - 1);
         }
+        scheduleTerminalResize();
       }
     });
   }
 
-  window.addEventListener('resize', () => {
-    if (!document.hidden && !leaving) scheduleFit();
-  });
-  window.visualViewport?.addEventListener('resize', () => {
-    if (!document.hidden && !leaving) scheduleFit();
-  });
-  new ResizeObserver(() => {
-    if (!document.hidden && !leaving) scheduleFit();
-  }).observe(host);
-  document.fonts.ready.then(() => {
-    if (!document.hidden && !leaving) scheduleFit();
-  });
+  // The shared shell now owns window, visual-viewport, element, font-ready,
+  // and bounded startup retry triggers. This direct-xterm path retains the
+  // actual geometry calculation, atlas invalidation, and pixel-size reporting.
   scheduleFit();
 
   function replaceArg(arg) {
-    if (currentArg !== arg) activeOmpEditorWindow = null;
+    const changed = currentArg !== arg;
     currentArg = arg;
     const url = new URL(location.href);
     if (arg === null) url.searchParams.delete('arg');
     else url.searchParams.set('arg', arg);
     if (url.href !== location.href) history.replaceState(history.state, '', url);
+    if (changed) {
+      activeOmpEditorWindow = null;
+      refreshArtifactCount();
+      scheduleArtifactScan();
+      if (artifactDialog.open) renderArtifactGallery();
+    }
   }
 
   function receiveTitle(raw, frame = false) {
@@ -578,22 +795,42 @@
   term.onData(sendInput);
   term.onBinary(data => sendInput(Uint8Array.from(data, character => character.charCodeAt(0))));
   let resizeTimer = null;
-  let lastSentCols = 0;
-  let lastSentRows = 0;
+  let lastSentSize = { columns: 0, rows: 0, width: 0, height: 0 };
 
-  term.onResize(({ cols, rows }) => {
+  function terminalSize() {
+    const screen = term.element.querySelector('.xterm-screen');
+    const rect = screen.getBoundingClientRect();
+    return {
+      columns: term.cols,
+      rows: term.rows,
+      // ttyd normally leaves ws_xpixel/ws_ypixel at zero. tmux then replaces
+      // SIXEL images with a grid of '+' fallback cells. CSS pixels match the
+      // dimensions reported by the xterm image addon to the application.
+      width: Math.max(1, Math.round(rect.width)),
+      height: Math.max(1, Math.round(rect.height)),
+    };
+  }
+
+  function sameTerminalSize(left, right) {
+    return left.columns === right.columns && left.rows === right.rows
+      && left.width === right.width && left.height === right.height;
+  }
+
+  function scheduleTerminalResize() {
     if (document.hidden || leaving) return;
-    if (cols === lastSentCols && rows === lastSentRows) return;
+    if (sameTerminalSize(terminalSize(), lastSentSize)) return;
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       if (document.hidden || leaving) return;
-      if (active && (cols !== lastSentCols || rows !== lastSentRows)) {
-        lastSentCols = cols;
-        lastSentRows = rows;
-        sendControl(active, '1', JSON.stringify({ columns: cols, rows }));
+      const size = terminalSize();
+      if (active && !sameTerminalSize(size, lastSentSize)) {
+        lastSentSize = size;
+        sendControl(active, '1', JSON.stringify(size));
       }
     }, 80);
-  });
+  }
+
+  term.onResize(scheduleTerminalResize);
 
   function retireConnection() {
     clearTimeout(reconnectTimer);
@@ -652,6 +889,7 @@
     const body = bytes.subarray(1);
     switch (bytes[0]) {
       case 48: {
+        const containsImage = imageAddon ? containsImageProtocol(body) : false;
         if (ctx.pending + body.byteLength > MAX_PENDING) {
           connectionFailed(ctx, 'Output exceeded the terminal buffer limit.', false);
           return;
@@ -662,6 +900,7 @@
         }
         term.write(body, () => {
           ctx.pending -= body.byteLength;
+          if (containsImage) scheduleArtifactScan();
           if (isCurrent(ctx) && ctx.paused && ctx.pending <= LOW_WATER) {
             ctx.paused = false;
             sendControl(ctx, '3');
@@ -699,6 +938,9 @@
       if (!isCurrent(ctx)) return;
       ctx.acceptTitles = false;
       ctx.sessionTitle = false;
+      imageProtocolEscape = false;
+      sixelHeaderBytesRemaining = 0;
+      iipMarkerOffset = 0;
       term.reset();
       term.options.disableStdin = true;
       ctx.timeout = setTimeout(() => connectionFailed(ctx, 'Connection timed out.'), 15000);
@@ -715,9 +957,8 @@
         socket.binaryType = 'arraybuffer';
         socket.addEventListener('open', () => {
           if (!isCurrent(ctx) || ctx.failed) { socket.close(); return; }
-          lastSentCols = term.cols;
-          lastSentRows = term.rows;
-          socket.send(encoder.encode(JSON.stringify({ AuthToken: token ?? '', columns: term.cols, rows: term.rows })));
+          lastSentSize = terminalSize();
+          socket.send(encoder.encode(JSON.stringify({ AuthToken: token ?? '', ...lastSentSize })));
           clearTimeout(ctx.timeout);
           ctx.ready = true;
           ctx.acceptTitles = true;
@@ -736,7 +977,6 @@
     });
   }
 
-  reconnect.addEventListener('click', () => { retryCount = 0; connect(); });
   window.addEventListener('online', () => { if (!active?.ready && !leaving) connect(); });
   window.addEventListener('popstate', () => {
     replaceArg(new URL(location.href).searchParams.get('arg'));
@@ -745,6 +985,7 @@
   });
   window.addEventListener('pagehide', () => {
     leaving = true;
+    clearTimeout(artifactScanTimer);
     clearTimeout(resizeTimer);
     stopPresenceHeartbeat();
     stopWindowBar();
@@ -752,12 +993,14 @@
   });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
+      clearTimeout(artifactScanTimer);
       clearTimeout(resizeTimer);
       stopPresenceHeartbeat();
       stopWindowBar();
     } else if (!leaving) {
       scheduleFit();
       startPresenceHeartbeat();
+      scheduleArtifactScan();
       startWindowBar();
     }
   });
@@ -875,6 +1118,10 @@
     renderComposer();
   }
 
+  composerToggle.addEventListener('click', () => {
+    if (composer.hidden) void openComposer();
+    else setComposerOpen(false);
+  });
   reflowToggle.addEventListener('click', () => {
     if (!composerConnected()) return;
     // OMP's display reset (Alt-L / \x1bl) emits ED2+ED3 to clear tmux
@@ -882,10 +1129,6 @@
     // In copy-mode, tmux.conf binds M-l to cancel copy-mode and forward M-l.
     // Never send \x0c (Ctrl-L): in OMP, Ctrl-L toggles voice listening mode!
     sendInput('\x1bl', true);
-  });
-  composerToggle.addEventListener('click', () => {
-    if (composer.hidden) void openComposer();
-    else setComposerOpen(false);
   });
   composerText.addEventListener('input', () => {
     composerMessage = '';
@@ -972,30 +1215,47 @@
   }
 
   // Drag a file anywhere onto the app to upload it, the same path as Attach.
-  // dragover must be cancelled or the browser navigates away from the session and
-  // opens the dropped file instead of uploading it.
+  // Own the gesture in the capture phase: xterm and image-renderer descendants
+  // may otherwise consume the drop before it bubbles back to #app.
   let dragDepth = 0;
   const appRoot = document.getElementById('app');
+
+  function isFileDrag(dataTransfer) {
+    if (!dataTransfer) return false;
+    if (Array.from(dataTransfer.types || []).includes('Files')) return true;
+    return Array.from(dataTransfer.items || []).some(item => item.kind === 'file');
+  }
+
+  function droppedFiles(dataTransfer) {
+    const files = Array.from(dataTransfer?.files || []);
+    if (files.length) return files;
+    return Array.from(dataTransfer?.items || [])
+      .filter(item => item.kind === 'file')
+      .map(item => item.getAsFile())
+      .filter(Boolean);
+  }
+
   appRoot.addEventListener('dragenter', event => {
-    if (!event.dataTransfer?.types?.includes('Files')) return;
+    if (!isFileDrag(event.dataTransfer)) return;
     event.preventDefault();
     dragDepth += 1;
     appRoot.classList.add('drag-over');
-  });
+  }, true);
   appRoot.addEventListener('dragover', event => {
-    if (!event.dataTransfer?.types?.includes('Files')) return;
+    if (!isFileDrag(event.dataTransfer)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
-  });
+  }, true);
   appRoot.addEventListener('dragleave', () => {
     dragDepth = Math.max(0, dragDepth - 1);
     if (!dragDepth) appRoot.classList.remove('drag-over');
-  });
+  }, true);
   appRoot.addEventListener('drop', event => {
     event.preventDefault();
+    event.stopPropagation();
     dragDepth = 0;
     appRoot.classList.remove('drag-over');
-    const files = Array.from(event.dataTransfer?.files || []);
+    const files = droppedFiles(event.dataTransfer);
     if (files.length) {
       uploadFiles(files);
       return;
@@ -1007,7 +1267,7 @@
       pasteToTerminal(text);
       focusTerminal();
     }
-  });
+  }, true);
 
   function openFilePicker() {
     if (uploading) return;
@@ -1026,12 +1286,14 @@
     const nameLabel = count === 1 ? files[0].name : `${count} files`;
     showNotice(`Uploading ${nameLabel}…`);
 
+    const target = artifactWindowTarget();
+    const uploadUrl = target ? `/upload?window=${encodeURIComponent(target)}` : '/upload';
     const paths = [];
     try {
       for (const file of files) {
         const formData = new FormData();
         formData.append('file', file, file.name);
-        const res = await fetch('/upload', {
+        const res = await fetch(uploadUrl, {
           method: 'POST',
           body: formData,
         });
@@ -1044,6 +1306,10 @@
           throw new Error(data.error || 'Server rejected file');
         }
         paths.push(data.path);
+      }
+      if (target === artifactWindowTarget()) {
+        refreshArtifactCount();
+        if (artifactDialog.open) renderArtifactGallery();
       }
 
       const insertText = paths.map(p => '@' + p).join(' ') + ' ';
@@ -1062,10 +1328,7 @@
         focusTerminal();
       }
 
-      showNotice(`Attached ${nameLabel} (@path inserted).`);
-      setTimeout(() => {
-        if (noticeText.textContent.startsWith('Attached ')) notice.hidden = true;
-      }, 4000);
+      showNotice(`Attached ${nameLabel} (@path inserted).`, null, 4000);
     } catch (err) {
       showNotice(`Upload failed: ${err.message}`);
     } finally {
@@ -1121,61 +1384,6 @@
     return null;
   }
 
-  function openPasteDialog() {
-    if (pasteDialog.open || leaving) return;
-    pasteText.value = '';
-    pasteDialog.showModal();
-    pasteText.focus({ preventScroll: true });
-  }
-
-  async function pasteClipboard() {
-    const ctx = active;
-    try {
-      if (!navigator.clipboard?.readText) { openPasteDialog(); return; }
-      const text = await navigator.clipboard.readText();
-      if (!isCurrent(ctx) || !ctx.ready) {
-        showNotice('The connection changed. Paste again when your session is connected.');
-        return;
-      }
-      if (text) {
-        pasteToTerminal(text);
-        focusTerminal();
-        return;
-      }
-      // No text: the clipboard may hold an image instead (a screenshot, a copied
-      // picture). Upload it exactly like Attach - a terminal has nowhere to put
-      // pixels, and omp takes a path it can open.
-      const image = await readClipboardImage();
-      if (image) {
-        await uploadFiles([image]);
-        return;
-      }
-      // Safari never reaches the branch above (it has no clipboard.read at all),
-      // so say how to get an image in rather than only what failed. Apple touch
-      // devices (iPhone/iPad - iPadOS reports itself as a Mac) have no Command-V,
-      // so point at the picker, which opens the photo library there.
-      const appleTouch = applePlatform && navigator.maxTouchPoints > 0;
-      showNotice(navigator.clipboard?.read
-        ? 'Nothing to paste: the clipboard holds no text or image. Use Attach for a file.'
-        : appleTouch
-          ? 'Nothing to paste as text. Use Attach to pick a photo or a file.'
-          : 'Nothing to paste as text. Press the paste shortcut (⌘V) for an image, or use Attach.');
-    } catch {
-      if (!leaving) openPasteDialog();
-    }
-  }
-
-  document.getElementById('cancel-paste').addEventListener('click', () => pasteDialog.close());
-  pasteDialog.addEventListener('close', () => {
-    pasteText.value = '';
-    focusTerminal();
-  });
-  document.getElementById('paste-form').addEventListener('submit', event => {
-    event.preventDefault();
-    if (!active?.ready) { showNotice('Reconnect before sending this paste.'); return; }
-    pasteToTerminal(pasteText.value);
-    pasteDialog.close();
-  });
 
   term.parser.registerOscHandler(52, data => {
     const separator = data.indexOf(';');
@@ -1573,9 +1781,10 @@
       selectionStatus.textContent = 'Nothing to copy yet.';
       return;
     }
-    // Synchronous first, carrying exactly the payload the user selected.
-    const copied = copyInGesture(payload) || await writeClipboard(payload);
-    if (copied) flashCopied();
+    const copied = await terminalShell.copyText(
+      payload,
+      hasSelection ? 'Copied selection' : `Copied ${historyRaw.length} lines`,
+    );
     selectionStatus.textContent = copied
       ? (hasSelection ? 'Copied selection.' : `Copied ${historyRaw.length} lines.`)
       : 'Copy was denied — select the text and use your browser menu.';
@@ -1593,150 +1802,6 @@
     focusTerminal();
   });
 
-  const NON_REPEATING_KEYS = new Set(['select', 'paste', 'attach', 'prefix', 'detach']);
-
-  function executeKey(key) {
-    if (key === 'paste') { pasteClipboard(); return; }
-    if (key === 'select') { openSelection(); return; }
-    if (key === 'attach') { openFilePicker(); return; }
-    if (key === 'zoom-in') { adjustFontSize(1); return; }
-    if (key === 'zoom-out') { adjustFontSize(-1); return; }
-    if (key === 'prefix') {
-      const armed = !prefixArmed;
-      if (sendInput('\x01', true)) setPrefix(armed);
-    } else if (key === 'detach') {
-      sendInput(prefixArmed ? 'd' : '\x01d', true);
-    } else {
-      // Arrows are plain escape sequences and work inside copy-mode as well:
-      // measured against #{pane_in_mode}, a keybar Up with no client-side mode
-      // tracked still resolves to tmux's named Up and moves the copy cursor
-      // (mode=1, scroll 1 -> 2). The removed Scroll button sent vi k/j here.
-      const arrows = { up: 'A', down: 'B', right: 'C', left: 'D' };
-      const keys = { escape: '\x1b', enter: '\r', backspace: '\x7f', tab: '\t', interrupt: '\x03', eof: '\x04', clear: '\x0c' };
-      // Always SS3 (application form). Both termininfo entries in this stack
-      // declare it - the client's TERM=xterm-256color and the pane's
-      // tmux-256color all say kcuu1=\EOA - and tmux parses client input against
-      // the former. Measured: a CSI up (0x1b 5b 41) is passed through untouched
-      // and types "[A" at the shell prompt, while SS3 recalls the history entry.
-      // The old conditional sent CSI whenever DECCKM was off.
-      const data = arrows[key] ? `\x1bO${arrows[key]}`
-        : keys[key];
-      sendInput(data, true);
-    }
-    focusTerminal();
-  }
-
-  let activeKeyButton = null;
-  let activePointerId = null;
-  let keyStartX = 0;
-  let keyStartY = 0;
-  let keyRepeatTimer = null;
-  let keyRepeatInterval = null;
-  let keyFiredCount = 0;
-  let lastPointerHandledTime = 0;
-
-  function stopKeyRepeat() {
-    clearTimeout(keyRepeatTimer);
-    clearInterval(keyRepeatInterval);
-    keyRepeatTimer = null;
-    keyRepeatInterval = null;
-    if (activeKeyButton) {
-      activeKeyButton.classList.remove('key-active');
-      activeKeyButton = null;
-    }
-    activePointerId = null;
-    keyFiredCount = 0;
-  }
-
-  // Cancel focus transfer, not the click: tapping a terminal key keeps the
-  // actual xterm textarea (and the phone keyboard) focused.
-  keybar.addEventListener('pointerdown', event => {
-    const button = event.target.closest('button[data-key]');
-    if (!button || button.disabled) return;
-    event.preventDefault();
-
-    stopKeyRepeat();
-
-    const key = button.dataset.key;
-    activeKeyButton = button;
-    activePointerId = event.pointerId;
-    keyStartX = event.clientX;
-    keyStartY = event.clientY;
-    keyFiredCount = 0;
-    button.classList.add('key-active');
-
-    const isMouse = event.pointerType === 'mouse';
-    const isRepeatable = !NON_REPEATING_KEYS.has(key);
-
-    if (isMouse) {
-      executeKey(key);
-      lastPointerHandledTime = Date.now();
-      keyFiredCount++;
-      if (isRepeatable) {
-        keyRepeatTimer = setTimeout(() => {
-          keyRepeatInterval = setInterval(() => {
-            executeKey(key);
-            lastPointerHandledTime = Date.now();
-            keyFiredCount++;
-          }, 60);
-        }, 350);
-      }
-    } else {
-      // Touch/pen: delay first repeat to allow horizontal toolbar scrolling.
-      // If held for 300ms without moving > 8px, start auto-repeat:
-      if (isRepeatable) {
-        keyRepeatTimer = setTimeout(() => {
-          executeKey(key);
-          lastPointerHandledTime = Date.now();
-          keyFiredCount++;
-          keyRepeatInterval = setInterval(() => {
-            executeKey(key);
-            lastPointerHandledTime = Date.now();
-            keyFiredCount++;
-          }, 60);
-        }, 300);
-      }
-    }
-  });
-
-  window.addEventListener('pointermove', event => {
-    if (activePointerId === null || event.pointerId !== activePointerId) return;
-    const distance = Math.hypot(event.clientX - keyStartX, event.clientY - keyStartY);
-    if (distance > 8) stopKeyRepeat();
-  });
-
-  window.addEventListener('pointerup', event => {
-    if (activePointerId === null || event.pointerId !== activePointerId) return;
-    const button = activeKeyButton;
-    const key = button?.dataset.key;
-    const fired = keyFiredCount;
-    stopKeyRepeat();
-
-    if (button && fired === 0 && !button.disabled) {
-      executeKey(key);
-      lastPointerHandledTime = Date.now();
-    }
-  });
-
-  window.addEventListener('pointercancel', event => {
-    if (event.pointerId === activePointerId) {
-      stopKeyRepeat();
-    }
-  });
-
-  window.addEventListener('blur', stopKeyRepeat);
-
-  keybar.addEventListener('contextmenu', event => {
-    if (event.target.closest('button')) event.preventDefault();
-  });
-
-  keybar.addEventListener('click', event => {
-    event.preventDefault();
-    if (Date.now() - lastPointerHandledTime < 500) return;
-    const button = event.target.closest('button[data-key]');
-    if (!button || button.disabled) return;
-    executeKey(button.dataset.key);
-  });
 
   function lineHeight() {
     const screen = term.element.querySelector('.xterm-screen');

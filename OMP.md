@@ -12,19 +12,17 @@ preview uses an isolated home volume.
 The domain route is persisted in the host Caddy configuration; see
 [Domain cutover](#domain-cutover) for the deployment path and access controls.
 
-**Active persistent deployment:** production runs `18.3.2-56` and attaches to
+**Active persistent deployment:** production runs `18.3.2-65` and attaches to
 the native host `omp-web-tmux.service`. OMP and shell processes survive web
-container restarts; the browser reconnects to the same tmux window. Two production
-restarts preserved the current conversation and a test shell. See
-[Production restart proof](#production-restart-proof-1832-12).
-The full-history Select dialog (colour, no wrapping, search) and the
-review batch below are included.
+container restarts; the browser reconnects to the same tmux window. The
+full-history Select dialog and the window-scoped Artifacts window are included.
 
 ## Architecture
 
 ```text
   HTTP /                              -> Caddy -> web/
   POST /upload, /presence             -> Caddy -> Python service -> ~/.omp/{uploads,web-visible}
+  GET/POST /artifacts                 -> Caddy -> same service -> ~/.omp/web-artifacts
   GET  /history, /history/search      -> Caddy -> same service -> tmux capture-pane
   GET  /windows, POST /windows/select -> Caddy -> same service -> tmux list-windows / select-window
   WebSocket /t/ws + /t/token          -> Caddy -> ttyd -> omp-launcher -> tmux -> omp/bash
@@ -45,11 +43,11 @@ container interfaces for Podman forwarding. The image is Linux x86-64.
 ## Build and isolated preview
 
 ```sh
-podman build -t localhost/omp-web:18.3.2-56 .
+podman build -t localhost/omp-web:18.3.2-65 .
 podman run --rm -it --name omp-web-preview \
   -p 127.0.0.1:17685:8080 \
   -v omp-web-home:/root \
-  localhost/omp-web:18.3.2-56
+  localhost/omp-web:18.3.2-65
 ```
 
 Open `http://127.0.0.1:17685/`. For a remote host, use an SSH tunnel, for example
@@ -93,6 +91,7 @@ settings:
 | `OMP_TERMINAL_PORT` / `--terminal-port` | `7682`; ttyd transport |
 | `OMP_BIND_ADDRESS` / `--bind` | native `127.0.0.1`, image `0.0.0.0` |
 | `OMP_TMUX_SOCKET` | explicit socket path; unset uses normal tmux discovery |
+| `OMP_ARTIFACTS_DIR` | `~/.omp/web-artifacts`; deduplicated terminal-image, upload and agent-download storage |
 | `OMP_TMUX_REQUIRE_SERVER` | unset normally; `1` adds tmux `-N`, forbidding automatic server creation |
 | `OMP_TMUX_SESSION` | `1`; session for newly created windows |
 | `OMP_SESSION_DIR` | `~/.omp/agent/sessions`; custom storage is passed to omp |
@@ -113,8 +112,10 @@ Paths and arguments are not interpolated into shell source.
 Creating an OMP window asks **Continue** (`omp -c`) or **Start new** (`omp`),
 defaulting to new. Invalid answers repeat the question; `q` or Ctrl-C cancels.
 Both choices add `--allow-home --config omp-config.yml`. The per-run overlay
-enables mouse input and preserves native scrollback on resize without rewriting
-the user's configuration. Ctrl-a c uses the same chooser in the current project.
+enables mouse input and uses OMP's `tui.resizeScrollback: rebuild` mode. After
+a settled resize, OMP clears terminal scrollback and replays one transcript at
+the current width, so prose and tool-result rows do not retain their old-width
+wrapping. Ctrl-a c uses the same chooser in the current project.
 The separate **Resume saved session** action still selects an exact saved UUID.
 
 Ordinary shells close their pane on exit, even when the last command failed.
@@ -146,8 +147,16 @@ Normal-screen wheel/touch scrolling enters tmux copy mode, not shell command
 history. Alternate-screen applications receive mouse wheels themselves.
 Copy-mode entry anchors the cursor to the top reading line unless a selection
 exists. Selections keep their own anchor; width changes still reflow text.
-Dragging in copy mode copies via OSC52 without exiting; browser-native selection
-is available with xterm's platform selection modifier.
+Dragging in copy mode copies via OSC52 without exiting. A plain browser drag is
+intercepted before tmux mouse reporting, copied synchronously on release, then
+cleared; an unmoved click is replayed to tmux and wheel reports remain
+unchanged. This gesture-bound path produces the browser/desktop copy feedback
+that asynchronous OSC52 cannot.
+
+Every terminal host pixel-size or device-pixel-ratio change now forces a full
+xterm repaint even when the fitted column/row count is unchanged. This prevents
+stale DOM row backgrounds and old-scale canvas glyphs after resizing while the
+existing ttyd pixel-size report continues to keep tmux geometry synchronized.
 
 `?arg=tmux-N` attaches stable window `@N`, `?arg=tmux` attaches raw tmux, and a
 legacy screen suffix attaches an existing `omp-SUFFIX` screen only. Invalid or
@@ -2324,6 +2333,312 @@ screenshot plus the code paths, not a verified fix. The reasoning that makes it
 likely: the faint copy is *smaller* than the real text, which only happens when
 two cell sizes are on screen at once.
 
+### SIXEL receives the browser's pixel geometry (`18.3.2-57`)
+
+Reported images still appeared as a rectangle of `+`/`X` cells after
+`18.3.2-47`. The missing layer was not the image addon, pane environment, or
+tmux passthrough setting. ttyd 1.7.7 sent only character columns and rows in its
+resize ioctl, leaving `ws_xpixel` and `ws_ypixel` at zero. tmux 3.5a parsed omp's
+raw SIXEL and stored the image, but its client renderer deliberately substituted
+`SIXEL IMAGE (...)` plus a grid of `+` cells when it could not derive a pixel
+size. Both attached browser clients confirmed `#{client_cell_width}x
+#{client_cell_height}` was `0x0`.
+
+The earlier `18.3.2-47` smoke test used a hand-built SIXEL sequence already
+wrapped in a tmux passthrough DCS. That bypassed tmux's native image renderer and
+therefore did not exercise omp's real raw-SIXEL path. Capturing omp's actual
+protocol test showed unwrapped `ESC P9;1;0q` data. Setting the scratch client's
+PTY dimensions to 1350x665 changed tmux's reported cell geometry from `0x0` to
+`10x19` and immediately replaced the fallback grid with the image, isolating the
+cause before code changes.
+
+The frontend now includes the `.xterm-screen` CSS width and height with columns
+and rows in ttyd's initial and resize messages. A small pinned-source patch to
+ttyd carries those values into Linux `winsize.ws_xpixel/ws_ypixel`; CSS pixels
+are intentional because the xterm image addon reports the same coordinate
+space to omp. Pixel-only geometry changes are sent too, even when the character
+grid is unchanged.
+
+Built and deployed `localhost/omp-web:18.3.2-57`. After a fresh page load, the
+real deployed tmux client reported `10x19` cells. Omp's `/debug` terminal
+protocol test rendered its gradient SIXEL instead of fallback characters; the
+xterm image canvas contained 70,374 non-transparent pixels in bounds
+`0,285-316,506`. All 34 unit tests and the frontend syntax check passed. The
+service restart preserved all eight pre-existing pane IDs and PIDs.
+
+### Inline images survive terminal resize (`18.3.2-58`)
+
+tmux 3.5a unconditionally frees every stored image when its screen's character
+grid changes. `18.3.2-58` therefore changed the overlay from `preserve` to
+`rebuild`, based on the assumption that OMP's viewport-only repaint would not
+re-emit a visible SIXEL image. The clean preserve-mode check in `18.3.2-59`
+disproved that assumption; this policy is superseded below.
+
+The `18.3.2-58` overlay set `tui.resizeScrollback: rebuild`. After the
+resize settles, omp clears the stale terminal scrollback and replays one copy
+of its transcript at the new width, including each inline image. `append` was
+not used because it would retain and duplicate the old-width transcript on
+every resize.
+
+Built and deployed `localhost/omp-web:18.3.2-58`. A real omp bash-tool result
+rendered a 240x120 gradient through SIXEL; resizing the deployed browser from
+135x35 cells to 98x32 and back kept 199,704 non-transparent image-canvas pixels.
+The image addon's last ID advanced from 16 to 20 to 33, confirming transcript
+replay rather than a stale canvas. All 34 unit tests and the frontend syntax
+check passed. The service restart preserved all eight existing pane IDs and
+PIDs, including the isolated smoke pane.
+
+### Tab switches no longer replay the transcript (`18.3.2-59`)
+
+Reported after `18.3.2-58`: selecting another terminal tab visibly replayed an
+OMP session from its first message to the live tail. That was the configured
+`tui.resizeScrollback: rebuild` behavior, triggered whenever tmux resized a
+window as the web client selected it. It was not an xterm or window-bar
+rendering bug.
+
+The overlay is back to `tui.resizeScrollback: preserve`. OMP now repaints only
+the current viewport after a resize, leaving native tmux history untouched. A
+clean OMP pane rendered a real 240x120 SIXEL bash-tool result and then resized
+from 160x43 cells to 116x38: the image remained visible with 201,612
+non-transparent canvas pixels, while the image ID advanced from 1 to 4. This
+demonstrated that OMP's forced viewport repaint does re-emit a visible image;
+full transcript replay was unnecessary.
+
+Built and deployed `localhost/omp-web:18.3.2-59`. After deployment, switching
+between two differently sized OMP windows showed the destination's final tail
+in samples taken 80, 260, and 910 ms after selection, never the transcript
+start. Resizing the selected pane from 116x38 to 160x42 cells retained the same
+201,612 image pixels and one stored image; its ID advanced from 10 to 12 as the
+viewport repaint re-emitted it. All 34 unit tests and the frontend syntax check
+passed. The restart preserved all eleven existing pane IDs and PIDs, including
+the four isolated smoke panes.
+
+### Durable terminal image gallery (`18.3.2-60`)
+
+The resize fix above keeps a visible image on screen, but tmux still discards
+its own image object when geometry changes and cannot provide old inline images
+from scrollback. The frontend now captures each image canvas exposed by
+`@xterm/addon-image` after terminal writes settle. **Images** opens a
+window-scoped HTML gallery; its count follows the selected tmux window. The
+gallery survives terminal resize, tab switching, WebSocket reconnects and page
+reloads. Capture necessarily starts when a browser renders the image; output
+produced only while no web client is attached cannot be recovered from tmux.
+
+`POST /artifacts?window=@N` accepts a bounded 25 MB PNG body. The Python service
+validates the PNG signature and IHDR dimensions while streaming to a temporary
+file, keys the final name by SHA-256, and atomically links it into
+`~/.omp/web-artifacts/<tmux-server-start>-<window-id>/`. Repaints and reconnects
+therefore deduplicate instead of growing the gallery. Pairing the window ID with
+tmux's server start time prevents an `@N` reused after a tmux restart from
+inheriting unrelated images. `GET /artifacts` lists newest first and
+`GET /artifacts/<sha256>.png` serves the image.
+
+Built and deployed `localhost/omp-web:18.3.2-60`
+(`d7ed014b745dc76c83d3c2f042a22694c06a19418d93d97887251b6de684cf4f`).
+All 36 unit tests, the JavaScript syntax check and Caddy validation passed. The
+restart preserved all eight existing pane IDs and PIDs. In an isolated deployed
+browser smoke, a 240x120 SIXEL gradient produced one deduplicated 240x132
+rendered-canvas artifact and an **Images (1)** gallery card. Resizing the
+terminal from 78x26 to 108x33 cells kept the count at one. Switching to a second
+scratch window showed no artifacts, switching back restored **Images (1)**, and
+a full page reload still showed the same single card. The scratch windows,
+artifact and browser page were removed afterward.
+
+### One Artifacts window for images, uploads and agent downloads (`18.3.2-61`)
+
+The **Images** gallery is now **Artifacts**. It contains three window-scoped
+sources: raster images rendered by xterm, files sent through the browser's
+Attach/paste/drop upload path, and completed files the agent explicitly
+provides for download. Raster PNG/JPEG/GIF/WebP files preview inline. Every
+type has its original name, source, size, creation time and a Download link;
+all non-preview types are served with `Content-Disposition: attachment` and
+`X-Content-Type-Options: nosniff`, so HTML/SVG or arbitrary agent output cannot
+execute in the terminal page's origin.
+
+Storage is shared by `omp_artifacts.py`: immutable `<sha256>.blob` data plus a
+small JSON metadata record under the existing tmux-generation/window
+directory. Browser uploads are copied into it only after their bounded upload
+completes. `omp-artifact` performs the same bounded copy for a local file. The
+launcher loads `omp-artifact-extension.ts` explicitly for every new or resumed
+OMP process; its essential `provide_artifact` tool tells agents to register a
+file whenever the user asks them to create, export, deliver or provide a
+download. Ordinary project files that an agent merely edits are deliberately
+not registered. The frontend refreshes the count with the existing three-second
+window-bar poll, so an agent-created file appears without reopening the page.
+
+Built and deployed `localhost/omp-web:18.3.2-61`
+(`fdd43775468ef37c0a2403601b14e3329ca039d9e32f6a3db53c2ec655769dd5`).
+All 37 unit tests, the JavaScript syntax check and Caddy validation passed; the
+restart preserved all eight existing pane IDs and PIDs. A deployed scratch OMP
+session loaded the extension and used `provide_artifact` to register a 20-byte
+CSV. Browser Attach registered a 25-byte text file, and reading a generated
+gradient produced a third, previewable terminal-image artifact. The live
+Artifacts window showed all three cards with Agent, Uploaded and Terminal image
+sources. Deployed downloads returned the exact CSV/text bytes with attachment
+headers; another tmux window showed no artifacts, switching back restored
+**Artifacts (3)**, and a full page reload retained the same count. The browser
+tab, tmux session, source files, upload copy, persisted artifacts and screenshots
+were removed afterward.
+
+### Artifact capture no longer scans on every scroll repaint (`18.3.2-62`)
+
+Reported that scrolling no longer behaved like it did before the image/artifact
+work. The wheel/touch handlers, tmux bindings and `tui.resizeScrollback:
+preserve` setting were unchanged, but the artifact implementation had added a
+cost directly behind them: `term.onWriteParsed(scheduleArtifactScan)`. tmux
+implements history scrolling by repainting the terminal, so every wheel notch
+caused the artifact scanner to inspect every visible cell. The deployed
+78-column by 26-row diagnostic measured exactly **2,028 image lookups per
+notch**, even in a pane containing no image.
+
+Ordinary output no longer schedules an artifact scan. A small allocation-free
+streaming detector now recognizes SIXEL DCS and iTerm2 IIP headers across
+WebSocket frame boundaries; only output that can add an image schedules the
+post-parse scan. Explicit resize and tab-switch scans remain, covering images
+already held by the addon without putting work in the scroll path.
+
+Built and deployed `localhost/omp-web:18.3.2-62`
+(`c1bf752e0aa5a43e608e0382d4f000d6b66fa85fcd8c8d497700b469972ea364`).
+All 37 unit tests, JavaScript syntax checking and Caddy validation passed. On
+the deployed page, one wheel notch entered tmux copy mode and moved exactly one
+line while performing zero artifact lookups. A real ImageMagick SIXEL gradient
+then triggered one 2,028-cell scan and appeared as one previewable Terminal
+image artifact; another wheel notch moved one line and left the lookup count
+unchanged at 2,028. The restart preserved all eight pre-existing pane IDs and
+PIDs. The browser page, scratch tmux session and persisted artifact were removed.
+
+### Artifacts matches key sizes; Compose scrolls with the keybar (`18.3.2-63`)
+
+The standalone Artifacts control now uses the same padding and height rules as
+the keybar buttons: 32px on a fine pointer and 44px on a coarse pointer. Compose
+is no longer pinned at the left edge. It moved into the horizontally scrollable
+keybar after Attach, leaving Artifacts as the sole fixed control.
+
+Verified on the deployed page at desktop and iPhone-sized touch layouts:
+Artifacts, Compose and Select measured 32px high on desktop and 44px high with a
+coarse pointer. Compose's parent is `#keybar`, at index 3 after Select, Paste and
+Attach; opening it set `aria-expanded=true` and exposed the composer, and closing
+it reversed both states. All 37 tests, the JavaScript syntax check and Caddy
+validation passed. Built and deployed `localhost/omp-web:18.3.2-63`
+(`7a90556df203ed6e801b2b21953baa86daef8acb3c12b2abd60625e89ae12fde`).
+
+### Larger iPhone window and key bars (`18.3.2-64`)
+
+Coarse-pointer layouts now use a 60px top window bar with 52px window buttons,
+and a 65px bottom tools row with 52px Artifacts/keybar buttons. Gaps, horizontal
+padding and the window-label font grow with the touch targets. Fine-pointer
+desktop dimensions remain unchanged.
+
+Verified on the deployed page at an emulated 390x844 iPhone viewport: the top
+bar measured 60px, its buttons 52px, the bottom bar 65px and every visible
+control 52px. The terminal still fit 40 columns by 37 rows in the remaining
+719px. At 900x700 with a fine pointer, the original 36px top bar and 32px
+controls remained unchanged. All 37 tests, JavaScript syntax checking and Caddy
+validation passed. Built and deployed `localhost/omp-web:18.3.2-64`
+(`50f5c7c62088b5f94093b1f2360e95b3cbf13712ec670aef1e47f0c6fec3afa2`).
+
+### File drops are captured before terminal descendants (`18.3.2-65`)
+
+Reported that drag-and-drop attachment stopped working. Follow-up comparison
+found that the drag handlers themselves had not changed between the pre-today
+frontend and `18.3.2-64`; the only adjacent upload-path change was adding
+`?window=@N` so successful uploads also become Artifacts. Replaying the exact
+`18.3.2-64` JavaScript against the current deployed Chromium page successfully
+completed a native file drop, so that change was not a general Chromium
+regression and the original trigger was not proven. The first diagnosis
+overstated the evidence.
+
+The old path did contain two latent cross-surface assumptions: a drop had to
+bubble from the xterm/image-renderer descendants to `#app`, and
+`DataTransfer.types` had to implement `.includes()` even though WebKit may expose
+a DOM string-list shape. The app now owns drag enter/over, leave and drop in the
+capture phase, normalizes `types` with `Array.from`, falls back to file-kind
+`items`, and stops an owned drop before a descendant can consume or duplicate
+it. Attach and clipboard-paste still use the unchanged `uploadFiles` tail.
+
+Verified through the deployed browser with a native CDP file drag onto the
+xterm screen: drag enter displayed the drop overlay; drop cleared it, uploaded
+the exact 19-byte file, inserted its `@/home/jieniu/.omp/uploads/...` path into
+the live shell prompt, showed the Attached notice and registered one
+`browser-upload` artifact for the tmux window. All smoke files, the upload copy,
+artifact, browser page and scratch session were removed. All 37 tests,
+JavaScript syntax checking and Caddy validation passed. Built and deployed
+`localhost/omp-web:18.3.2-65`
+(`63c162bb218852fa543911b53c8c362bb34ef6bfe0c15b425c9b9348ae9116f6`).
+
+### Discord alerts deep-link to the notifying window
+
+`discord-alert` now resolves its own `$TMUX_PANE` to the stable tmux window id
+and adds `https://omp.jieniuu8.com/?arg=tmux-N` to each Discord embed. The embed
+title is clickable and the message includes an **Open OMP session** link button.
+Opening it bypasses the launcher and attaches directly to the window that sent
+the notification. The existing tailnet restriction still applies; no credential
+or access token is placed in the URL. `OMP_WEB_BASE_URL` can override the site
+root if this extension is reused elsewhere.
+
+The extension compiled successfully. A credential-free mocked delivery from pane
+`%6` produced both an embed URL and link-button URL ending in `?arg=tmux-6`.
+A deployed-browser smoke link to isolated window `@30` opened with
+`arg=tmux-30`, reported connected and showed that window's tmux title; the tab
+and scratch session were removed. New OMP processes load the change
+automatically. Existing long-running OMP processes must run `/reload` once
+because extension source is loaded into each process.
+
+### Mail, calendar, and omp share one terminal shell
+
+Host Caddy now serves `terminal-shell.js` and `terminal-shell.css` on all three
+terminal origins. The shell generates the common Copy/Paste and terminal-key
+controls and owns gesture-aware clipboard fallback, notice presentation, font
+zoom, keyboard lock, touch-safe repeat/cancellation, connection-state display,
+and resize triggers. omp supplies a direct-xterm adapter and retains its
+WebSocket flow control, tmux window bar, pixel-size resize frames, renderer
+selection, wheel/touch copy-mode bridge, composer, uploads, selection history,
+and artifacts.
+
+The resize boundary deliberately combines lessons from both implementations:
+the shell observes window, visual-viewport, terminal-element and font-ready
+changes and performs bounded startup retries; omp's adapter still coalesces each
+request through `requestAnimationFrame`, fits with `FitAddon`, invalidates the
+canvas atlas after metric changes, and reports rows, columns and nonzero pixel
+dimensions to the PTY. Mail's explicit `FontFaceSet.load()` and font-family
+reassignment remain local because omp uses platform fonts rather than lazy
+webfonts.
+
+Live verification used isolated tmux window `@35`. Shared Paste delivered
+terminal input, Enter executed it, and SS3 Up recalled it. Prefix state changed
+to armed after Ctrl-A and reset after the following key. Copy captured the xterm
+selection. Resizing from 1280x800 to 800x500 changed xterm from 140x39 to 86x22
+and the PTY `TIOCGWINSZ` result from `39 140 1260 702` to
+`22 86 774 396`. Wheel input still entered tmux copy mode. Composer, selection
+history, and Artifacts dialogs remained operational.
+
+### OMP owns transcript reflow; shared copy feedback keeps its scissors
+
+OMP exposes three resize modes through `tui.resizeScrollback`: `append` keeps
+old history and replays at the new width below it, `preserve` repaints only the
+viewport while retaining native tmux history, and `rebuild` erases terminal
+scrollback before replaying one current-width transcript. The web launcher uses
+`preserve`. In `pi-tui`, the `rebuild` branch runs before its width-only guard,
+so every settled height change triggers the destructive replay even though the
+implementation's own contract says height-only changes reflow nothing. Mobile
+keyboard and visual-viewport transitions produce several such heights.
+
+Deferring rebuild until scroll is not a sound boundary here: tmux consumes the
+wheel/touch reports in copy-mode, so OMP never receives a scroll event, and
+erasing/replaying history while it is being read would reset that position.
+Preserving tmux history avoids the repeated buffers without introducing a
+browser-to-OMP control protocol or mutating scrollback during navigation.
+
+Mail and calendar get their white scissors from ttyd 1.7.7 itself: its
+`onSelectionChange` handler runs `document.execCommand("copy")`, then its
+`OverlayAddon` renders the text glyph `✂` at terminal centre with `#101010` on
+`#f0f0f0`, 0.75 opacity, a 15px radius, 200ms hold and 180ms fade. OMP bypasses
+the ttyd frontend and therefore had neither that handler nor the overlay addon.
+The shared shell now gives OMP the same glyph, styling, terminal-centred
+position and timing after a successful copy. Mail and calendar leave this
+optional replica disabled so their original ttyd overlay remains the sole icon.
+Clipboard refusal still leaves the actionable error notice.
+
 ### Coalesced mobile swipes retain their full distance
 
 The touch bridge used to subtract the complete calculated scroll distance from
@@ -2348,41 +2663,37 @@ same gestures moved all 99 requested lines, returned
 12-event gesture pairs also returned to the live row, proving behavior no
 longer depends on browser pointer-event coalescing.
 
-### Preserve tmux history instead of rebuilding it during mobile resizes
-
-The web launcher uses `tui.resizeScrollback: preserve`. In `pi-tui`, the
-`rebuild` branch runs before its width-only guard, so every settled height change
-triggers a destructive transcript replay even though height-only changes reflow
-nothing. Mobile keyboard and visual-viewport transitions produce several such
-heights. Deferring rebuild until scroll is not a sound boundary: tmux consumes
-wheel and touch reports in copy-mode, so OMP never receives that scroll event,
-and replaying history while it is being read would reset the reader's position.
-
 ### Compose synchronizes the live OMP editor
 
 Opening an empty Compose panel in a running OMP pane invokes OMP's built-in
 **Copy prompt** action (`Alt-Shift-C`, encoded by xterm as `ESC C`). OMP reads
-its editor with `getText()` and returns UTF-8 through OSC 52; the pending request
-routes that one response into the textarea instead of the system clipboard.
-`/windows` exposes only an `editor` boolean, derived from the pane's current and
-start commands, so post-exit shells and unrelated applications never receive
-the shortcut. Drafts containing semantic chips or attachments stay in OMP
-because copied display labels cannot preserve their expansions or attached data.
+its semantic editor with `getText()` and returns UTF-8 through OSC 52; while the
+request is pending, the browser routes that one response into the textarea
+instead of the system clipboard. `/windows` exposes only an `editor` boolean,
+derived from the pane's current and start commands, so post-exit shells and
+unrelated full-screen applications never receive the shortcut.
+Drafts containing OMP image, video, large-paste, skill, or model chips stay in
+the terminal: `getText()` exposes their display labels but not attached bytes or
+submit-time expansions, so importing them would silently degrade semantic data.
 
 Synchronization is non-destructive: OMP retains its original draft while the
-textarea is edited. **Replace** re-reads that draft and proceeds only if it still
-exactly matches the imported source and the same tmux window remains active. It
-then sends OMP's normal clear action before bracketed-pasting the replacement,
-preventing duplication. Changed windows, either changed draft, and failed
-responses abort without modifying either copy.
+textarea is edited. **Replace** re-reads the OMP draft and proceeds only if it
+still exactly matches the imported source and the same tmux window is active.
+It then sends OMP's normal clear action before bracketed-pasting the replacement,
+preventing duplication. A changed window, changed live draft, failed response,
+or changed textarea aborts without modifying either draft. Existing local
+Compose text is never overwritten; shell panes keep the original append-only
+Paste behavior.
 
 Live verification used an iPhone-emulated 390x844 browser and isolated tmux
-session `omp-compose-smoke`. A two-line Unicode draft synchronized exactly and
-an edited replacement returned without duplication. A concurrent external edit
-was detected and preserved. Empty OMP input opened an empty disabled panel; a
-shell pane was marked `editor: false` and received no bytes. The textarea kept
-focus on the coarse-pointer surface, all 38 tests passed, and restarting the
-helper service preserved every pre-existing pane PID.
+session `omp-compose-smoke`. A two-line Unicode OMP draft synchronized exactly,
+remained visible in OMP, and an edited two-line replacement returned without the
+source text being duplicated. A concurrent external edit was detected and left
+both drafts intact. Empty OMP input opened an empty disabled panel; a shell pane
+was marked `editor: false` and received no bytes. The textarea retained focus on
+the coarse-pointer surface. The helper-service restart preserved every
+pre-existing pane PID.
+
 ### Explicit Reflow button clears scrollback and replays transcript
 
 A new **Reflow** button in the tools keybar next to Compose triggers an
@@ -2398,3 +2709,17 @@ automatically returns to the live tail and re-renders the clean transcript.
 This avoids the involuntary churn of `resizeScrollback: rebuild` while giving
 the user deliberate, one-tap control over transcript rewrapping after phone
 rotation or font size changes.
+
+### Two-row toolbar layout and A0 zoom reset
+
+The bottom tools area now renders in two independent, horizontally scrollable
+rows instead of crowding service actions and terminal keys together:
+
+- **Row 1 (Service actions)**: `Artifacts`, `Select`, `Attach`, `Compose`,
+  `Reflow`.
+- **Row 2 (General terminal keys)**: `Copy`, `Paste`, `Esc`, `Enter`, `⌫`, `^C`,
+  `Tab`, `↑`, `↓`, `←`, `→`, `^A`, `^L`, `A−`, `A0`, `A+`, `Detach`, `^D`.
+
+`A0` resets terminal font zoom to default (14px), removes any stored
+`terminal-font-size` override from localStorage, re-fits the terminal, and
+shows a brief confirmation notice.

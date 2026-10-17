@@ -172,15 +172,34 @@ button:focus-visible, textarea:focus-visible {
 #terminal-tools {
   grid-row: 5;
   display: flex;
+  flex-direction: column;
   min-width: 0;
   gap: 4px;
-  align-items: center;
-  padding: 5px 4px;
+  align-items: stretch;
+  padding: 4px;
   border-top: 1px solid #303b49;
+}
+
+#service-bar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pinch-zoom;
+  scrollbar-width: thin;
 }
 
 #composer-toggle, #reflow-toggle { flex: none; min-height: 32px; }
 #composer-toggle[aria-expanded="true"] { background: #354d65; }
+#artifact-toggle { flex: none; min-height: 32px; }
+#artifact-toggle[data-count]:not([data-count="0"]) {
+  color: #d9ecff;
+  border-color: #5f89ad;
+  background: #29425a;
+}
 
 #composer {
   grid-row: 4;
@@ -229,89 +248,6 @@ button:focus-visible, textarea:focus-visible {
 .composer-actions button { min-width: 44px; min-height: 44px; padding: 6px 8px; }
 #composer-paste { margin-left: auto; background: #294a3c; }
 
-#keybar {
-  flex: 1;
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 4px;
-  padding: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  touch-action: pan-x pinch-zoom;
-  scrollbar-width: thin;
-}
-
-#keybar button {
-  flex: 0 0 auto;
-  min-width: 32px;
-  min-height: 32px;
-  padding: 4px 8px;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-#keybar button:active,
-#keybar button.key-active {
-  background: #3c4f68;
-  border-color: #6d8ba8;
-}
-
-#prefix[aria-pressed="true"] {
-  color: #161a21;
-  background: #8fcbff;
-  border-color: #d1eaff;
-}
-
-#notice {
-  position: absolute;
-  z-index: 5;
-  top: calc(env(safe-area-inset-top, 0px) + 54px + var(--window-bar-height));
-  right: calc(env(safe-area-inset-right, 0px) + 8px);
-  left: calc(env(safe-area-inset-left, 0px) + 8px);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px;
-  border: 1px solid #a18a64;
-  border-radius: 6px;
-  background: #322b20;
-  box-shadow: 0 4px 16px #0008;
-  font-size: 14px;
-}
-
-/* A brief scissors pill for a copy that landed. Overlay only: it must not
-   reflow the terminal (or resize the tmux pane), and it takes no pointer
-   events so it can never swallow a click. */
-#copied-flash {
-  position: absolute;
-  z-index: 6;
-  top: calc(env(safe-area-inset-top, 0px) + 54px + var(--window-bar-height));
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 8px;
-  border: 1px solid #a18a64;
-  border-radius: 999px;
-  background: #322b20;
-  box-shadow: 0 4px 16px #0008;
-  color: #d8e0ee;
-  pointer-events: none;
-}
-
-#copied-flash svg {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-#notice-text { flex: 1; overflow-wrap: anywhere; }
-#notice button { flex: none; }
 
 dialog {
   width: min(500px, calc(100% - 24px));
@@ -342,6 +278,67 @@ dialog textarea {
 }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .dialog-actions button { min-height: 44px; }
+
+#artifact-dialog { width: min(960px, calc(100% - 16px)); padding: 12px; }
+.artifact-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.artifact-heading p { margin-bottom: 0; }
+#artifact-status { min-height: 1.5em; color: #c5d6ea; }
+#artifact-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  gap: 12px;
+}
+.artifact-card {
+  min-width: 0;
+  padding: 8px;
+  background: #161a21;
+  border: 1px solid #465366;
+  border-radius: 6px;
+}
+.artifact-preview {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  background: #0e1116;
+  overflow: hidden;
+}
+.artifact-card img {
+  display: block;
+  max-width: 100%;
+  max-height: 50dvh;
+  object-fit: contain;
+}
+.artifact-file-icon {
+  color: #9bc9f1;
+  font-family: ui-monospace, monospace;
+  font-size: 18px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.artifact-name {
+  margin: 8px 0 0;
+  color: #e0e8f2;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.artifact-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  color: #c5d6ea;
+  font-size: 12px;
+}
+.artifact-meta span { overflow-wrap: anywhere; }
+.artifact-meta a { flex: none; color: #9bc9f1; }
 
 #selection-dialog { width: min(720px, calc(100% - 16px)); padding: 12px; }
 /* History view: real DOM text (so it is selectable and searchable), colour
@@ -382,6 +379,8 @@ dialog textarea {
 #selection-status { min-height: 1.5em; }
 
 @media (any-pointer: coarse) {
-  #keybar button, #composer-toggle { min-width: 44px; min-height: 44px; padding: 8px 10px; }
-  .connection-bar button, #notice button { min-width: 44px; min-height: 44px; }
+  :root { --window-bar-height: 60px; }
+  #window-bar { gap: 6px; padding: 4px 6px; }
+  #window-bar button { min-height: 52px; padding: 0 14px; font-size: 15px; }
+  .connection-bar button { min-width: 52px; min-height: 52px; }
 }

@@ -6,12 +6,14 @@
   <meta name="theme-color" content="#161a21">
   <title>omp terminal</title>
   <link rel="stylesheet" href="/vendor/xterm.css">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=20261017-14">
+  <link rel="stylesheet" href="/terminal-shell.css?v=20261017-14">
   <script defer src="/vendor/xterm.js"></script>
   <script defer src="/vendor/addon-fit.js"></script>
   <script defer src="/vendor/addon-canvas.js"></script>
   <script defer src="/vendor/addon-image.js"></script>
-  <script defer src="/app.js?v=20261017-13"></script>
+  <script defer src="/terminal-shell.js?v=20261017-14"></script>
+  <script defer src="/app.js?v=20261017-14"></script>
 </head>
 <body>
   <main id="app" aria-label="omp web terminal">
@@ -31,55 +33,17 @@
       </div>
     </section>
     <div id="terminal-tools">
-      <button id="composer-toggle" type="button" aria-expanded="false" aria-controls="composer">Compose</button>
-      <button id="reflow-toggle" type="button" aria-label="Reflow and replay terminal transcript">Reflow</button>
-    <nav id="keybar" aria-label="Terminal keys">
-      <button type="button" data-key="select" aria-label="Select terminal text">Select</button>
-      <button type="button" data-key="paste" aria-label="Paste clipboard into the terminal">Paste</button>
-      <button type="button" data-key="attach" aria-label="Attach file or photo">Attach</button>
-      <button type="button" data-key="escape" aria-label="Escape">Esc</button>
-      <button type="button" data-key="enter" aria-label="Enter">Enter</button>
-      <button type="button" data-key="backspace" aria-label="Backspace, delete">⌫</button>
-      <button type="button" data-key="interrupt" aria-label="Control C, interrupt">^C</button>
-      <button type="button" data-key="tab" aria-label="Tab">Tab</button>
-      <button type="button" data-key="up" aria-label="Arrow up">↑</button>
-      <button type="button" data-key="down" aria-label="Arrow down">↓</button>
-      <button type="button" data-key="left" aria-label="Arrow left">←</button>
-      <button type="button" data-key="right" aria-label="Arrow right">→</button>
-      <button id="prefix" type="button" data-key="prefix" aria-label="Control A, multiplexer prefix" aria-pressed="false">^A</button>
-      <button type="button" data-key="clear" aria-label="Control L, redraw">^L</button>
-      <button type="button" data-key="zoom-out" aria-label="Zoom out terminal font">A−</button>
-      <button type="button" data-key="zoom-in" aria-label="Zoom in terminal font">A+</button>
-      <button type="button" data-key="detach" aria-label="Detach from the multiplexer session">Detach</button>
-      <button type="button" data-key="eof" aria-label="Control D, end of input">^D</button>
-    </nav>
+      <div id="service-bar" class="terminal-app-actions" aria-label="Service actions">
+        <button id="artifact-toggle" type="button" aria-haspopup="dialog" aria-controls="artifact-dialog">Artifacts</button>
+        <button type="button" data-key="select" aria-label="Select terminal text">Select</button>
+        <button type="button" data-key="attach" aria-label="Attach file or photo">Attach</button>
+        <button id="composer-toggle" type="button" aria-expanded="false" aria-controls="composer">Compose</button>
+        <button id="reflow-toggle" type="button" aria-label="Reflow and replay terminal transcript">Reflow</button>
+      </div>
+      <nav id="keybar" class="terminal-keybar" aria-label="Terminal keys"></nav>
     </div>
     <input type="file" id="file-uploader" style="display: none;" multiple>
-    <aside id="notice" role="status" aria-live="polite" aria-atomic="true" hidden>
-      <span id="notice-text"></span>
-      <button id="notice-copy" type="button" hidden>Copy</button>
-      <button id="dismiss-notice" type="button" aria-label="Dismiss notice">Dismiss</button>
-    </aside>
-    <div id="copied-flash" role="status" aria-live="polite" aria-label="Copied to clipboard" hidden>
-      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
-        <circle cx="6" cy="6" r="3"/>
-        <circle cx="6" cy="18" r="3"/>
-        <path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"/>
-      </svg>
-    </div>
   </main>
-  <dialog id="paste-dialog" aria-labelledby="paste-title" aria-describedby="paste-help">
-    <form id="paste-form">
-      <h1 id="paste-title">Paste into terminal</h1>
-      <p id="paste-help">Clipboard access is unavailable. Paste here using your keyboard or touch menu, then choose Send paste.</p>
-      <label for="paste-text">Text to paste</label>
-      <textarea id="paste-text" rows="5" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
-      <div class="dialog-actions">
-        <button id="cancel-paste" type="button">Cancel</button>
-        <button id="send-paste" type="submit">Send paste</button>
-      </div>
-    </form>
-  </dialog>
   <dialog id="selection-dialog" aria-labelledby="selection-title">
     <h1 id="selection-title">Select terminal text</h1>
     <p>Full terminal history, with colour. Drag to select; scroll up to load older output; lines scroll sideways rather than wrapping.</p>
@@ -96,6 +60,20 @@
       <button id="select-all" type="button">Select all</button>
       <button id="copy-selection" type="button">Copy</button>
       <button id="close-selection" type="button" autofocus>Close</button>
+    </div>
+  </dialog>
+  <dialog id="artifact-dialog" aria-labelledby="artifact-title" aria-describedby="artifact-help">
+    <div class="artifact-heading">
+      <div>
+        <h1 id="artifact-title">Artifacts</h1>
+        <p id="artifact-help">Images, uploaded attachments, and files provided by the agent for this terminal window.</p>
+      </div>
+      <button id="refresh-artifacts" type="button">Refresh</button>
+    </div>
+    <p id="artifact-status" role="status" aria-live="polite"></p>
+    <div id="artifact-gallery" aria-label="Terminal artifacts"></div>
+    <div class="dialog-actions">
+      <button id="close-artifacts" type="button" autofocus>Close</button>
     </div>
   </dialog>
   <noscript>This terminal requires JavaScript.</noscript>
