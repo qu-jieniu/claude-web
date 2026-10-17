@@ -192,6 +192,11 @@
   let fitFrame = null;
   let composerComposing = false;
   let composerMessage = '';
+  let composerSyncing = false;
+  let composerSyncedText = null;
+  let composerSyncedWindow = null;
+  let composerDraftRequest = null;
+  let activeOmpEditorWindow = null;
   let terminalAction = false;
   let uploading = false;
   let presenceTimer = null;
@@ -202,6 +207,7 @@
   // The window bar is navigation, so it can lag a little; tmux's list-windows is
   // a local call and this only runs while the tab is visible.
   const WINDOW_BAR_INTERVAL_MS = 3000;
+  const COMPOSER_SYNC_TIMEOUT_MS = 1200;
 
   // Tells the discord-alert extension "this specific tmux window is on screen
   // right now", independent of whether the WebSocket/tmux client is still
@@ -252,6 +258,12 @@
       const response = await fetch('/windows', { cache: 'no-store' });
       const data = await response.json();
       if (!data?.ok || !Array.isArray(data.windows) || !data.windows.length) return;
+      const requested = currentArg?.replace('tmux-', '@');
+      const attached = data.windows.find(entry => entry.id === requested) ||
+        data.windows.find(entry => entry.active);
+      const selected = attached &&
+        data.windows.find(entry => entry.session === attached.session && entry.active);
+      activeOmpEditorWindow = selected?.editor ? selected.id : null;
       windowBar.replaceChildren(...data.windows.map(entry => {
         const button = document.createElement('button');
         button.type = 'button';
@@ -272,8 +284,7 @@
       if (!windowBar.dataset.ready) {
         // First paint: bring the window this tab is attached to into view.
         windowBar.dataset.ready = '1';
-        const mine = currentArg?.replace('tmux-', '@');
-        const attached = data.windows.find(entry => entry.id === mine) ||
+        const attached = data.windows.find(entry => entry.id === requested) ||
           data.windows.find(entry => entry.active);
         revealTab(windowBar.querySelector(`button[data-window="${attached?.id}"]`));
       } else if (newlyFlagged.length) {
@@ -308,6 +319,7 @@
       other.setAttribute('aria-current', 'false');
     }
     button.setAttribute('aria-current', 'true');
+    activeOmpEditorWindow = null;
     revealTab(button);
     try {
       await fetch(`/windows/select?window=${encodeURIComponent(button.dataset.window)}`,
@@ -507,6 +519,7 @@
   scheduleFit();
 
   function replaceArg(arg) {
+    if (currentArg !== arg) activeOmpEditorWindow = null;
     currentArg = arg;
     const url = new URL(location.href);
     if (arg === null) url.searchParams.delete('arg');
@@ -769,13 +782,51 @@
     return active?.ready && active.socket?.readyState === WebSocket.OPEN && !leaving;
   }
 
+  function settleComposerDraftRequest(result) {
+    const request = composerDraftRequest;
+    if (!request) return;
+    clearTimeout(request.timer);
+    composerDraftRequest = null;
+    request.resolve(result);
+  }
+
+  /** Ask OMP to copy its editor through its built-in Alt-Shift-C action. The
+   * next OSC 52 response stays inside Compose instead of touching the system
+   * clipboard. Shell panes never receive the shortcut: /windows marks only a
+   * currently-running OMP process as editor-capable. */
+  function requestOmpEditorText() {
+    const windowId = activeOmpEditorWindow;
+    if (!windowId || composerDraftRequest || !composerConnected()) {
+      return Promise.resolve(null);
+    }
+    return new Promise(resolve => {
+      const request = { windowId, resolve, timer: null };
+      composerDraftRequest = request;
+      request.timer = setTimeout(() => {
+        if (composerDraftRequest === request) settleComposerDraftRequest(null);
+      }, COMPOSER_SYNC_TIMEOUT_MS);
+      // xterm emits ESC + uppercase C for Alt-Shift-C.
+      if (!sendInput('\x1bC', true)) settleComposerDraftRequest(null);
+    });
+  }
+
+  function hasOmpEditorTokens(text) {
+    // OMP's getText() returns display labels for semantic chips, not their
+    // submit-time expansions or attached image bytes. Never turn those labels
+    // into plain text by round-tripping them through a browser textarea.
+    return /[\uE000-\uF8FF]/u.test(text) ||
+      /(?:^|\s)(?:🖼|🎞|📄|img|vid|txt) #[1-9]\d*(?=\s|$)/u.test(text) ||
+      /(?:^|\s)(?:⬢|✦|\[M\]|SK) \S+/u.test(text);
+  }
+
   function renderComposer() {
     const connected = composerConnected();
     composerStatus.textContent = connected ? composerMessage : 'Disconnected. Your draft is kept.';
     composerStatus.hidden = !composerStatus.textContent;
-    composerPaste.disabled = !connected || composerComposing || !composerText.value.length;
-    composerClear.disabled = composerComposing;
-    composerAttach.disabled = uploading;
+    composerPaste.textContent = composerSyncedText === null ? 'Paste' : 'Replace';
+    composerPaste.disabled = !connected || composerComposing || composerSyncing || !composerText.value.length;
+    composerClear.disabled = composerComposing || composerSyncing;
+    composerAttach.disabled = uploading || composerSyncing;
   }
 
   function setComposerOpen(open) {
@@ -793,7 +844,40 @@
     scheduleFit();
   }
 
-  composerToggle.addEventListener('click', () => setComposerOpen(composer.hidden));
+  async function openComposer() {
+    setComposerOpen(true);
+    if (composerText.value.length || !activeOmpEditorWindow) return;
+    composerSyncing = true;
+    composerMessage = 'Syncing the current OMP draft…';
+    renderComposer();
+    const result = await requestOmpEditorText();
+    composerSyncing = false;
+    if (composer.hidden) {
+      renderComposer();
+      return;
+    }
+    if (!result || result.windowId !== activeOmpEditorWindow || !result.text) {
+      composerMessage = '';
+      renderComposer();
+      return;
+    }
+    if (hasOmpEditorTokens(result.text)) {
+      composerMessage = 'The OMP draft contains chips or attachments. Edit it in the terminal to preserve them.';
+      renderComposer();
+      return;
+    }
+    composerText.value = result.text;
+    composerText.setSelectionRange(result.text.length, result.text.length);
+    composerSyncedText = result.text;
+    composerSyncedWindow = result.windowId;
+    composerMessage = 'Synced from OMP. Replace updates the live entry when ready.';
+    renderComposer();
+  }
+
+  composerToggle.addEventListener('click', () => {
+    if (composer.hidden) void openComposer();
+    else setComposerOpen(false);
+  });
   composerText.addEventListener('input', () => {
     composerMessage = '';
     renderComposer();
@@ -807,21 +891,60 @@
     renderComposer();
   });
   composerClear.addEventListener('click', () => {
-    if (composerComposing) return;
+    if (composerComposing || composerSyncing) return;
     composerText.value = '';
     composerMessage = '';
+    composerSyncedText = null;
+    composerSyncedWindow = null;
     renderComposer();
     composerText.focus({ preventScroll: true });
   });
-  composerPaste.addEventListener('click', () => {
-    if (composerPaste.disabled || composerComposing) return;
-    if (!pasteToTerminal(composerText.value)) {
+  composerPaste.addEventListener('click', async () => {
+    if (composerPaste.disabled || composerComposing || composerSyncing) return;
+    const draft = composerText.value;
+    if (composerSyncedText !== null) {
+      if (activeOmpEditorWindow !== composerSyncedWindow) {
+        composerMessage = 'The terminal window changed. Close and reopen Compose before replacing its entry.';
+        renderComposer();
+        return;
+      }
+      composerSyncing = true;
+      composerMessage = 'Checking that the OMP draft has not changed…';
+      renderComposer();
+      const current = await requestOmpEditorText();
+      composerSyncing = false;
+      if (!current || current.windowId !== composerSyncedWindow) {
+        composerMessage = 'Could not verify the live OMP draft. Nothing was replaced.';
+        renderComposer();
+        return;
+      }
+      if (current.text !== composerSyncedText) {
+        composerMessage = 'The live OMP draft changed. Close and reopen Compose to sync it again.';
+        renderComposer();
+        return;
+      }
+      if (composerText.value !== draft) {
+        composerMessage = 'The Compose draft changed while checking. Press Replace again.';
+        renderComposer();
+        return;
+      }
+      // The synchronized source still matches exactly. Clear it before pasting
+      // the edited replacement so text is never duplicated.
+      if (!sendInput('\x03', true)) {
+        composerMessage = 'The live OMP draft could not be cleared. Nothing was replaced.';
+        renderComposer();
+        return;
+      }
+    }
+    if (!pasteToTerminal(draft)) {
       composerMessage = 'Paste could not be sent. Your draft is kept; check the terminal before trying again.';
       renderComposer();
       return;
     }
     composerText.value = '';
     composerMessage = '';
+    composerSyncedText = null;
+    composerSyncedWindow = null;
     renderComposer();
     setComposerOpen(false);
   });
@@ -1054,6 +1177,11 @@
     try {
       const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
       const text = decoder.decode(bytes);
+      if (composerDraftRequest) {
+        const { windowId } = composerDraftRequest;
+        settleComposerDraftRequest({ windowId, text });
+        return true;
+      }
       writeClipboard(text).then(copied => {
         // Always refresh the notice. Reporting only failures left the previous
         // notice - and its Copy button - frozen after a silent success, so a
@@ -1066,7 +1194,8 @@
         showNotice('Clipboard copy was blocked. Press Copy to place it on the clipboard.', text);
       });
     } catch {
-      showNotice('The terminal clipboard request could not be decoded.');
+      if (composerDraftRequest) settleComposerDraftRequest(null);
+      else showNotice('The terminal clipboard request could not be decoded.');
     }
     return true;
   });

@@ -2347,3 +2347,39 @@ same gestures moved all 99 requested lines, returned
 `pane_in_mode=0`, and rendered `ENTRY>` as the last terminal row. One-event and
 12-event gesture pairs also returned to the live row, proving behavior no
 longer depends on browser pointer-event coalescing.
+
+### Preserve tmux history instead of rebuilding it during mobile resizes
+
+The web launcher uses `tui.resizeScrollback: preserve`. In `pi-tui`, the
+`rebuild` branch runs before its width-only guard, so every settled height change
+triggers a destructive transcript replay even though height-only changes reflow
+nothing. Mobile keyboard and visual-viewport transitions produce several such
+heights. Deferring rebuild until scroll is not a sound boundary: tmux consumes
+wheel and touch reports in copy-mode, so OMP never receives that scroll event,
+and replaying history while it is being read would reset the reader's position.
+
+### Compose synchronizes the live OMP editor
+
+Opening an empty Compose panel in a running OMP pane invokes OMP's built-in
+**Copy prompt** action (`Alt-Shift-C`, encoded by xterm as `ESC C`). OMP reads
+its editor with `getText()` and returns UTF-8 through OSC 52; the pending request
+routes that one response into the textarea instead of the system clipboard.
+`/windows` exposes only an `editor` boolean, derived from the pane's current and
+start commands, so post-exit shells and unrelated applications never receive
+the shortcut. Drafts containing semantic chips or attachments stay in OMP
+because copied display labels cannot preserve their expansions or attached data.
+
+Synchronization is non-destructive: OMP retains its original draft while the
+textarea is edited. **Replace** re-reads that draft and proceeds only if it still
+exactly matches the imported source and the same tmux window remains active. It
+then sends OMP's normal clear action before bracketed-pasting the replacement,
+preventing duplication. Changed windows, either changed draft, and failed
+responses abort without modifying either copy.
+
+Live verification used an iPhone-emulated 390x844 browser and isolated tmux
+session `omp-compose-smoke`. A two-line Unicode draft synchronized exactly and
+an edited replacement returned without duplication. A concurrent external edit
+was detected and preserved. Empty OMP input opened an empty disabled panel; a
+shell pane was marked `editor: false` and received no bytes. The textarea kept
+focus on the coarse-pointer surface, all 38 tests passed, and restarting the
+helper service preserved every pre-existing pane PID.

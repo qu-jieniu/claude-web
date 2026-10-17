@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 upload_globals = runpy.run_path(str(ROOT / 'omp-web-upload'))
 sanitize_filename = upload_globals['sanitize_filename']
+is_omp_editor = upload_globals['is_omp_editor']
 
 
 class FilenameSanitizationTests(unittest.TestCase):
@@ -33,6 +34,16 @@ class FilenameSanitizationTests(unittest.TestCase):
         self.assertEqual(sanitize_filename('.'), 'upload.bin')
         self.assertEqual(sanitize_filename('...'), 'upload.bin')
         self.assertEqual(sanitize_filename('.bashrc'), 'bashrc')
+
+
+class OmpEditorDetectionTests(unittest.TestCase):
+    def test_detects_running_omp_without_mistaking_its_post_exit_shell(self):
+        start = ('/bin/bash -lc "exec \"$@\"" omp-window omp --allow-home '
+                 '--config /home/user/omp-web/omp-config.yml')
+        self.assertTrue(is_omp_editor('bun', start))
+        self.assertTrue(is_omp_editor('omp', 'omp --allow-home'))
+        self.assertFalse(is_omp_editor('bash', start))
+        self.assertFalse(is_omp_editor('bun', 'bun run another-app'))
 
 
 class UploadServerTests(unittest.TestCase):
@@ -468,6 +479,7 @@ class WindowEndpointTests(unittest.TestCase):
         self.assertTrue(all(w['dead'] is False for w in mine))
         self.assertTrue(all(isinstance(w['activity'], bool) and isinstance(w['bell'], bool) for w in mine))
         self.assertTrue(all(w['path'] for w in mine))
+        self.assertTrue(all(w['editor'] is False for w in mine))
 
     def test_select_makes_the_window_current(self):
         _, payload = self.windows()
