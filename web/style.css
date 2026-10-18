@@ -30,6 +30,11 @@ button {
 }
 
 button:hover { background: #45475a; }
+button:active {
+  background: #585b70 !important;
+  transform: scale(0.96);
+  transition: transform 0.05s ease;
+}
 button:disabled { cursor: not-allowed; opacity: .55; }
 button:focus-visible, textarea:focus-visible {
   outline: 2px solid #89b4fa;
@@ -223,6 +228,10 @@ button:focus-visible, textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 #composer-status { color: #a6adc8; }
+#composer-status[data-kind="success"] { color: #a6e3a1; font-weight: 600; }
+#composer-status[data-kind="error"] { color: #f38ba8; font-weight: 600; }
+#composer-status[data-kind="warning"] { color: #fab387; font-weight: 600; }
+#composer-status[data-kind="info"] { color: #89b4fa; }
 #composer-text {
   display: block;
   width: 100%;
@@ -235,8 +244,9 @@ button:focus-visible, textarea:focus-visible {
   background: #1e1e2e;
   border: 1px solid #45475a;
   border-radius: 4px;
-  font-size: 16px;
-  line-height: 1.35;
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 15px;
+  line-height: 1.4;
   user-select: text;
   -webkit-user-select: text;
   touch-action: auto;

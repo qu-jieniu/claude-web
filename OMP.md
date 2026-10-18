@@ -2806,3 +2806,20 @@ into `wheelRemainder`, matching the non-tracking fallback. Only when a full
 terminal line has accumulated does it emit a scroll report to tmux. This scales
 trackpad scrolling 1:1 with physical finger motion while keeping standard
 notched mouse wheels at their usual rate.
+
+### Typography, tactile feedback, and typing key priority
+
+1. **Monospace Compose Font**: `#composer-text` now explicitly uses a clean
+   monospace stack (`ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace`)
+   at 15px / 1.4 line-height, eliminating ragged proportional text and ensuring
+   code snippets, commands, and markdown align cleanly.
+2. **Tactile Button Feedback**: Added `button:active` styling across all toolbars
+   (`transform: scale(0.96); transition: transform 0.05s ease;` with `#585b70`
+   active highlight), providing instant physical-switch-style visual response on
+   mobile touch.
+3. **Semantic Status Colors**: `#composer-status` uses semantic Catppuccin tokens
+   (Sage `#a6e3a1` for success/sync confirmation, Coral `#f38ba8` for errors,
+   Peach `#fab387` for warnings, Blue `#89b4fa` for in-progress operations).
+4. **Typing Key Priority on Row 2**: Reordered `COMMON_KEYS` so typing essentials
+   (`Esc` · `Enter` · `⌫` · `Tab` · `^C`) appear first on the left, directly under
+   the thumb without requiring horizontal scrolling on phone screens.

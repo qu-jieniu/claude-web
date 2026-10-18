@@ -195,6 +195,14 @@
   let lastFitBox = { width: 0, height: 0, dpr: 0 };
   let composerComposing = false;
   let composerMessage = '';
+  let composerMessageKind = '';
+  function setComposerStatus(message = '', kind = '') {
+    composerMessage = message;
+    composerMessageKind = kind;
+    if (kind) composerStatus.dataset.kind = kind;
+    else delete composerStatus.dataset.kind;
+    renderComposer();
+  }
   let composerSyncing = false;
   let composerSyncedText = null;
   let composerSyncedWindow = null;
@@ -1104,8 +1112,7 @@
     setComposerOpen(true);
     if (composerText.value.length || !activeOmpEditorWindow) return;
     composerSyncing = true;
-    composerMessage = 'Syncing the current OMP draft…';
-    renderComposer();
+    setComposerStatus('Syncing the current OMP draft…', 'info');
     const result = await requestOmpEditorText();
     composerSyncing = false;
     if (composer.hidden) {
@@ -1113,21 +1120,18 @@
       return;
     }
     if (!result || result.windowId !== activeOmpEditorWindow || !result.text) {
-      composerMessage = '';
-      renderComposer();
+      setComposerStatus('');
       return;
     }
     if (hasOmpEditorTokens(result.text)) {
-      composerMessage = 'The OMP draft contains chips or attachments. Edit it in the terminal to preserve them.';
-      renderComposer();
+      setComposerStatus('The OMP draft contains chips or attachments. Edit it in the terminal to preserve them.', 'warning');
       return;
     }
     composerText.value = result.text;
     composerText.setSelectionRange(result.text.length, result.text.length);
     composerSyncedText = result.text;
     composerSyncedWindow = result.windowId;
-    composerMessage = 'Synced from OMP. Replace updates the live entry when ready.';
-    renderComposer();
+    setComposerStatus('Synced from OMP. Replace updates the live entry when ready.', 'success');
   }
 
   composerToggle.addEventListener('click', () => {
@@ -1143,8 +1147,7 @@
     sendInput('\x1bl', true);
   });
   composerText.addEventListener('input', () => {
-    composerMessage = '';
-    renderComposer();
+    setComposerStatus('');
   });
   composerText.addEventListener('compositionstart', () => {
     composerComposing = true;
@@ -1157,7 +1160,7 @@
   composerClear.addEventListener('click', () => {
     if (composerComposing || composerSyncing) return;
     composerText.value = '';
-    composerMessage = '';
+    setComposerStatus('');
     composerSyncedText = null;
     composerSyncedWindow = null;
     renderComposer();
@@ -1168,45 +1171,38 @@
     const draft = composerText.value;
     if (composerSyncedText !== null) {
       if (activeOmpEditorWindow !== composerSyncedWindow) {
-        composerMessage = 'The terminal window changed. Close and reopen Compose before replacing its entry.';
-        renderComposer();
+        setComposerStatus('The terminal window changed. Close and reopen Compose before replacing its entry.', 'warning');
         return;
       }
       composerSyncing = true;
-      composerMessage = 'Checking that the OMP draft has not changed…';
-      renderComposer();
+      setComposerStatus('Checking that the OMP draft has not changed…', 'info');
       const current = await requestOmpEditorText();
       composerSyncing = false;
       if (!current || current.windowId !== composerSyncedWindow) {
-        composerMessage = 'Could not verify the live OMP draft. Nothing was replaced.';
-        renderComposer();
+        setComposerStatus('Could not verify the live OMP draft. Nothing was replaced.', 'error');
         return;
       }
       if (current.text !== composerSyncedText) {
-        composerMessage = 'The live OMP draft changed. Close and reopen Compose to sync it again.';
-        renderComposer();
+        setComposerStatus('The live OMP draft changed. Close and reopen Compose to sync it again.', 'error');
         return;
       }
       if (composerText.value !== draft) {
-        composerMessage = 'The Compose draft changed while checking. Press Replace again.';
-        renderComposer();
+        setComposerStatus('The Compose draft changed while checking. Press Replace again.', 'warning');
         return;
       }
       // The synchronized source still matches exactly. Clear it before pasting
       // the edited replacement so text is never duplicated.
       if (!sendInput('\x03', true)) {
-        composerMessage = 'The live OMP draft could not be cleared. Nothing was replaced.';
-        renderComposer();
+        setComposerStatus('The live OMP draft could not be cleared. Nothing was replaced.', 'error');
         return;
       }
     }
     if (!pasteToTerminal(draft)) {
-      composerMessage = 'Paste could not be sent. Your draft is kept; check the terminal before trying again.';
-      renderComposer();
+      setComposerStatus('Paste could not be sent. Your draft is kept; check the terminal before trying again.', 'error');
       return;
     }
     composerText.value = '';
-    composerMessage = '';
+    setComposerStatus('');
     composerSyncedText = null;
     composerSyncedWindow = null;
     renderComposer();
