@@ -553,14 +553,14 @@
   }
 
   async function refreshWindowBar() {
-    if (windowBarBusy || !currentArg) return;
+    if (windowBarBusy) return;
     windowBarBusy = true;
     try {
       const response = await fetch('/windows', { cache: 'no-store' });
       const data = await response.json();
       if (!data?.ok || !Array.isArray(data.windows) || !data.windows.length) return;
       const requested = currentArg?.replace('tmux-', '@');
-      const attached = data.windows.find(entry => entry.id === requested) ||
+      const attached = (requested && data.windows.find(entry => entry.id === requested)) ||
         data.windows.find(entry => entry.active);
       const selected = attached &&
         data.windows.find(entry => entry.session === attached.session && entry.active);
@@ -573,7 +573,8 @@
         if (entry.activity) button.dataset.activity = '1';
         if (entry.bell) button.dataset.bell = '1';
         button.textContent = `${entry.session}:${entry.index} ${entry.name}`;
-        button.setAttribute('aria-current', entry.active ? 'true' : 'false');
+        const isCurrentTab = requested ? entry.id === requested : entry.active;
+        button.setAttribute('aria-current', isCurrentTab ? 'true' : 'false');
         button.setAttribute('aria-label', `Switch to ${entry.session} window ${entry.index} (${entry.name})`);
         return button;
       }));
@@ -618,7 +619,11 @@
     // its screen and title with the selected one.
     scanArtifactCanvases();
     const button = event.target.closest('button[data-window]');
-    if (!button || button.getAttribute('aria-current') === 'true') return;
+    const isDetached = !currentArg;
+    if (!button || (!isDetached && button.getAttribute('aria-current') === 'true')) return;
+    const targetWindowId = button.dataset.window;
+    const targetArg = targetWindowId.replace('@', 'tmux-');
+
     // Show the tap immediately, then let the next refresh confirm it.
     for (const other of windowBar.querySelectorAll('button')) {
       other.setAttribute('aria-current', 'false');
@@ -627,10 +632,15 @@
     activeOmpEditorWindow = null;
     revealTab(button);
     try {
-      await fetch(`/windows/select?window=${encodeURIComponent(button.dataset.window)}`,
+      await fetch(`/windows/select?window=${encodeURIComponent(targetWindowId)}`,
                   { method: 'POST', cache: 'no-store' });
     } catch {}
-    refreshWindowBar();
+    if (isDetached) {
+      replaceArg(targetArg);
+      connect(true);
+    } else {
+      refreshWindowBar();
+    }
   });
 
   // Text that a browser refused to put on the clipboard because the request had

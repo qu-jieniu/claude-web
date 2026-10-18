@@ -2823,3 +2823,19 @@ notched mouse wheels at their usual rate.
 4. **Typing Key Priority on Row 2**: Reordered `COMMON_KEYS` so typing essentials
    (`Esc` · `Enter` · `⌫` · `Tab` · `^C`) appear first on the left, directly under
    the thumb without requiring horizontal scrolling on phone screens.
+
+### Top window bar active in detached mode with click-to-attach
+
+When OMP soft-detached (e.g. cross-device takeover via `tmux attach-session -d`
+when a laptop tab connected, or dropping back to `omp-launcher`), the top window
+bar previously stopped updating and remained hidden because `refreshWindowBar`
+bailed on `!currentArg`. Users were stranded on the launcher menu without window
+navigation.
+
+1. **Persistent Window Bar**: Removed the `!currentArg` gate from
+   `refreshWindowBar()`. The window bar continues updating every 3s even on the
+   launcher page, rendering all session windows with active/notification states.
+2. **Click-to-Attach**: In detached mode (`!currentArg`), tapping any window tab
+   on `#window-bar` immediately selects that window on the tmux server, sets
+   `currentArg = tmux-N`, updates the browser URL, and connects the WebSocket to
+   attach directly to that session.

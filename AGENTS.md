@@ -49,7 +49,9 @@ podman exec omp-web-host sh -c 'cd /opt/omp-web && sha256sum <changed files>'
   `kcuu1=\EOA`, and tmux parses client input against the former. CSI is passed
   through untouched and types `[A` into the shell.
 - **tmux's status line is deliberately off.** The frontend draws the window bar
-  from `/windows`. Re-enabling `status` costs a row and duplicates the bar.
+  from `/windows`. Re-enabling `status` costs a row and duplicates the bar. The
+  bar stays active and visible even in detached mode (`currentArg === null`),
+  where tapping any window tab attaches directly to that session (`connect(true)`).
 - **Inline images need all three layers**: `@xterm/addon-image` (SIXEL + iTerm2),
   `allow-passthrough on` in `tmux.conf`, and `PI_FORCE_IMAGE_PROTOCOL=sixel` +
   `PI_ALLOW_SIXEL_PASSTHROUGH=1` on the pane. The launcher passes those with
