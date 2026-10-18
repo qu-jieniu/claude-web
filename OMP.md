@@ -2839,3 +2839,22 @@ navigation.
    on `#window-bar` immediately selects that window on the tmux server, sets
    `currentArg = tmux-N`, updates the browser URL, and connects the WebSocket to
    attach directly to that session.
+
+### Text selection highlight persistence and high-contrast Lavender selection
+
+When selecting text with the mouse or trackpad, `copySelectionOnRelease` in
+`terminal-shell.js` previously called `adapter.clearSelection()` immediately
+upon mouse release. This wiped the visual selection highlight in 0 milliseconds,
+making it appear as though selecting text had failed or produced no highlight.
+In addition, `selectionBackground` (`#585b70`) had low contrast against the
+dark base.
+
+1. **Persistent Selection**: Removed the immediate `clearSelection()` call on
+   mouse release. The visual selection highlight remains visible so the user
+   can see what was selected, clearing naturally on the next click or keypress.
+2. **High-Contrast Selection Colors**: Set `selectionBackground: #b4befe`
+   (Catppuccin Lavender) and `selectionForeground: #11111b` (Crust / dark text)
+   across OMP, Mail, and Calendar. Selected text now highlights with an
+   unmistakable, high-contrast, crystal-clear visual bar.
+3. **Mouse Tracking in GNU Screen**: Added `mousetrack on` to `mail/aerc/config/screenrc`,
+   enabling mouse events to reach `aerc`.
