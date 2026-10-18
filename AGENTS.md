@@ -9,7 +9,7 @@ section before changing behaviour, and add a section when you change it.
 
 | path | what it is |
 |---|---|
-| `web/` | frontend: xterm.js plus local canvas/image addons, hand-written `app.js`/`style.css`/`index.html` |
+| `web/` | frontend: direct xterm.js/WebSocket client plus local canvas/image addons; app-specific `app.js`/`style.css`/`index.html` consume the host-served shared terminal shell |
 | `omp-web-entry` | supervises Caddy, ttyd and `omp-web-upload`; any child exiting fails the appliance |
 | `omp-web-upload` | Python service: `/upload`, `/presence`, `/history*`, `/windows*` |
 | `omp-launcher` | TUI that lists, attaches to and creates tmux windows |
@@ -60,12 +60,49 @@ podman exec omp-web-host sh -c 'cd /opt/omp-web && sha256sum <changed files>'
   `execCommand('copy')` first, never after an `await`. Safari has no
   `navigator.clipboard.read()` at all: clipboard images arrive through the
   `paste` event, iPhone reaches them only via Attach.
+- **Shared controls are transport-neutral.** Host Caddy serves
+  `~/.containers/terminal-common/terminal-shell.{js,css}` on this origin. The
+  shell owns the baseline keybar, clipboard fallback, plain-drag local selection
+  with gesture-bound auto-copy and success feedback, notices, font zoom and
+  resize triggers; `web/app.js` keeps xterm construction, socket flow control,
+  pixel-size reporting, tmux windows, history, composer, uploads and artifacts.
+  The local adapter must preserve stationary mouse clicks and wheel reports.
+  Do not move transport or wheel/touch copy-mode behavior into the shell.
 - **Uploads**: reserve the name with `open(path, 'xb')` (check-then-open races),
   and strip exactly the framing CRLF from multipart parts. Body reads are
   bounded; a partial file is deleted on failure.
 - **Never build a shell command from a request.** tmux targets are validated
   against `WINDOW_RE` and passed as argv.
-
+- **Resize scrollback is `preserve`; transcript reflow is on-demand via `Reflow` (`Alt-L`).**
+  Automatic `rebuild` erases and replays the transcript on every settled resize,
+  churning tmux scrollback with duplicate history blocks during mobile software keyboard
+  open/close (height changes). An explicit `Reflow` button in `#service-bar` emits `Alt-L`
+  (`\x1bl`), issuing `ED2+ED3` to clear tmux scrollback and replay all markdown tables and
+  prose rewrapped at current width. `tmux.conf` binds `M-l` in copy-mode to cancel copy-mode
+  and forward `M-l`.
+- **Never send `\x0c` (`Ctrl-L`) for reflow.** In OMP, `Ctrl-L` is mapped to
+  `app.live.toggle` (voice listening mode). Reflow exclusively sends `\x1bl` (`Alt-L`).
+- **Compose synchronization is non-destructive.** Opening an empty Compose drawer imports
+  the live OMP draft using OMP's `Copy prompt` action (`Alt-Shift-C` / OSC 52). `Replace`
+  re-verifies the live draft before sending `\x03` (clear) and bracketed-pasting the
+  replacement. Drafts with semantic chips or attachments stay in the terminal.
+- **Mobile tap-to-focus and iOS Safari blur prevention.** On `touchstart`, if
+  `term.textarea` is focused, calling `event.preventDefault()` prevents WebKit from
+  executing its default tap blur on non-input elements, keeping the keyboard open.
+  Drag threshold is 14px, and pointer capture is deferred until swipe movement begins.
+  A clean tap emits SGR mouse click, triggering `MouseDown1Pane` in tmux copy-mode to
+  cancel copy-mode and return directly to the live prompt row.
+- **Desktop trackpad and wheel scroll speed.** Accumulate `deltaY / lineHeight()` into
+  `wheelRemainder` before emitting SGR reports to keep trackpad scrolling 1:1 with finger
+  motion without runaway acceleration.
+- **Theme is unified to Catppuccin Mocha.** All services share `#1e1e2e` base,
+  `#cdd6f4` text, and `#181825` panels. OMP uses `theme.dark: dark-catppuccin` in
+  `omp-config.yml`.
+- **Two-row toolbar layout.** Row 1 (`#service-bar` / `.terminal-app-actions`) holds
+  service actions (`Artifacts`, `Select`, `Attach`, `Compose`, `Reflow`). Row 2
+  (`#keybar` / `.terminal-keybar`) holds general terminal keys with `A0` zoom reset,
+  prioritizing typing keys (`Esc`, `Enter`, `⌫`, `Tab`, `^C`) on the left. Bottom padding
+  uses `max(12px, env(safe-area-inset-bottom, 0px))` for iPhone display corner radii.
 ## Verifying
 
 Exercise the real surface, not only the tests: drive the deployed page in
