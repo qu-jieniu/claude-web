@@ -2791,3 +2791,18 @@ to keep the keyboard open.
 4. **Tap-to-prompt SGR dispatch**: Clean taps on mouse-tracked panes emit a
    `MouseDown1Pane` SGR sequence, triggering tmux's copy-mode cancel binding
    and snapping directly to the live prompt.
+
+### Trackpad and mouse wheel scroll speed normalized
+
+Desktop wheel events previously called `sendScrollReports(Math.sign(event.deltaY))`
+unconditionally in mouse tracking mode. On Mac trackpads, Magic Mice, and smooth
+precision wheels, a single continuous finger glide emits dozens to hundreds of
+low-magnitude `WheelEvent`s per second (e.g. `deltaY: 1` or `2`). Converting
+every micro-event into a full SGR report caused runaway acceleration where
+hundreds of history lines flew by in a fraction of a second.
+
+The mouse tracking path now accumulates `amount` (`event.deltaY / lineHeight()`)
+into `wheelRemainder`, matching the non-tracking fallback. Only when a full
+terminal line has accumulated does it emit a scroll report to tmux. This scales
+trackpad scrolling 1:1 with physical finger motion while keeping standard
+notched mouse wheels at their usual rate.

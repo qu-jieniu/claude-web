@@ -1865,21 +1865,21 @@
   let wheelRemainder = 0;
   term.attachCustomWheelEventHandler(event => {
     if (event.ctrlKey) return false; // trackpad pinch / Ctrl+wheel stays browser zoom
-    if (term.modes.mouseTrackingMode !== 'none') {
-      sendScrollReports(Math.sign(event.deltaY) * WHEEL_REPORTS, event);
-      event.preventDefault();
-      return false;
-    }
-    // No mouse reporting (e.g. the launcher menu): scroll xterm's own buffer.
-    // xterm's alternate-scroll fallback would send cursor keys instead, which
-    // must never rotate the shell's command history.
     const amount = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY
       : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? event.deltaY * term.rows
         : event.deltaY / lineHeight();
-    wheelRemainder += amount * SCROLL_SPEED;
+    wheelRemainder += amount;
     const lines = Math.trunc(wheelRemainder);
+    if (!lines) {
+      event.preventDefault();
+      return false;
+    }
     wheelRemainder -= lines;
-    if (lines) term.scrollLines(lines);
+    if (term.modes.mouseTrackingMode !== 'none') {
+      sendScrollReports(lines, event);
+    } else {
+      term.scrollLines(lines);
+    }
     event.preventDefault();
     return false;
   });
